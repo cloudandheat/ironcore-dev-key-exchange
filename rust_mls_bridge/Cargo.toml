@@ -1,0 +1,16 @@
+[package]
+name = "rust_mls_bridge"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+openmls = "0.8.1"
+openmls_rust_crypto = "0.5.1"
+openmls_basic_credential = "0.5.0"
+tls_codec = "0.4"
+hex = "0.4"
+openmls_traits = "0.5.0"
+libc = "0.2"
