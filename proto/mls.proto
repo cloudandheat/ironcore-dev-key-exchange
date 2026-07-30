@@ -1,0 +1,72 @@
+syntax = "proto3";
+
+package mls;
+option go_package = "./proto";
+
+message Empty {}
+
+message GenerateReq { 
+    string client_id = 1; 
+}
+
+message GenerateKeyPackageRes { 
+    string key_package_hex = 1; 
+}
+
+message CreateGroupReq { 
+    string client_id = 1; 
+    string group_id = 2; 
+}
+
+message InviteReq { 
+    string client_id = 1; 
+    string group_id = 2; 
+    string target_kp_hex = 3; 
+}
+
+message InviteRes { 
+    bytes welcome_bytes = 1; 
+    bytes commit_bytes = 2; 
+}
+
+message ProcessCommitReq { 
+    string client_id = 1; 
+    string group_id = 2; 
+    bytes commit_bytes = 3; 
+}
+
+message SerializeTreeReq { 
+    string group_id = 1; 
+}
+
+message SerializeTreeRes { 
+    bytes tree_bytes = 1; 
+}
+
+message JoinGroupReq { 
+    string client_id = 1; 
+    string group_id = 2; 
+    bytes welcome_bytes = 3; 
+    bytes tree_bytes = 4; 
+}
+
+message ExportSecretReq { 
+    string client_id = 1; 
+    string group_id = 2; 
+    string label = 3; 
+}
+
+message ExportSecretRes { 
+    bytes secret_bytes = 1; 
+}
+
+service MlsService {
+    rpc GenerateCredential(GenerateReq) returns (Empty);
+    rpc GenerateKeyPackage(GenerateReq) returns (GenerateKeyPackageRes);
+    rpc CreateGroup(CreateGroupReq) returns (Empty);
+    rpc InviteMembers(InviteReq) returns (InviteRes);
+    rpc ProcessCommit(ProcessCommitReq) returns (Empty);
+    rpc SerializeTree(SerializeTreeReq) returns (SerializeTreeRes);
+    rpc JoinGroup(JoinGroupReq) returns (Empty);
+    rpc ExportSharedSecret(ExportSecretReq) returns (ExportSecretRes);
+}
