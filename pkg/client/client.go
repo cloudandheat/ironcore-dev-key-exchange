@@ -97,20 +97,25 @@ func sendMsg(serverURL, to, msgType, from string, epoch uint64, groupID string, 
 func (c *ClientImpl) Init(name, brokerURL string) error {
 	c.name = name
 	c.serverURL = brokerURL
+	logrus.Infof("poi1")
 
 	grpcURL := os.Getenv("RUST_GRPC_URL")
 	conn, err := grpc.NewClient(grpcURL, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return fmt.Errorf("failed to connect to grpc: %v", err)
 	}
+	logrus.Infof("poi2")
 	c.grpcClient = pb.NewMlsServiceClient(conn)
 	ctx := context.Background()
 
+	logrus.Infof("poi3")
 	c.grpcClient.GenerateCredential(ctx, &pb.GenerateReq{ClientId: name})
 
+	logrus.Infof("poi4")
 	kpRes, _ := c.grpcClient.GenerateKeyPackage(ctx, &pb.GenerateReq{ClientId: name})
 	pubKey := []byte(kpRes.KeyPackageHex)
 
+	logrus.Infof("poi5")
 	url := fmt.Sprintf("%s/upload_kp?user=%s", brokerURL, name)
 	for {
 		resp, err := http.Post(url, "application/octet-stream", bytes.NewBuffer(pubKey))
@@ -119,9 +124,12 @@ func (c *ClientImpl) Init(name, brokerURL string) error {
 		}
 		logrus.Infof("[%s] Waiting for broker to come online...\n", c.name)
 		time.Sleep(1 * time.Second)
+		logrus.Infof("poi6")
 	}
 
+	logrus.Infof("poi7")
 	c.startListener()
+	logrus.Infof("poi8")
 	return nil
 }
 
