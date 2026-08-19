@@ -240,46 +240,54 @@ pub struct BackendMlsService {}
 #[tonic::async_trait]
 impl MlsService for BackendMlsService {
     async fn generate_credential(&self, request: Request<GenerateReq>) -> Result<Response<Empty>, Status> {
+        println!("generate_credential");
         generate_credential_with_key(&request.into_inner().client_id);
         Ok(Response::new(Empty {}))
     }
 
     async fn generate_key_package(&self, request: Request<GenerateReq>) -> Result<Response<GenerateKeyPackageRes>, Status> {
+        println!("generate_key_package");
         let hex = generate_key_package(&request.into_inner().client_id);
         Ok(Response::new(GenerateKeyPackageRes { key_package_hex: hex }))
     }
 
     async fn create_group(&self, request: Request<CreateGroupReq>) -> Result<Response<Empty>, Status> {
+        println!("create_group");
         let req = request.into_inner();
         create_group(&req.client_id, &req.group_id);
         Ok(Response::new(Empty {}))
     }
 
     async fn invite_members(&self, request: Request<InviteReq>) -> Result<Response<InviteRes>, Status> {
+        println!("invite_members");
         let req = request.into_inner();
         let (welcome, commit) = invite_members(&req.client_id, &req.group_id, req.target_kp_hex);
         Ok(Response::new(InviteRes { welcome_bytes: welcome, commit_bytes: commit }))
     }
 
     async fn process_commit(&self, request: Request<ProcessCommitReq>) -> Result<Response<Empty>, Status> {
+        println!("process_commit");
         let req = request.into_inner();
         process_commit(&req.client_id, &req.group_id, &req.commit_bytes);
         Ok(Response::new(Empty {}))
     }
 
     async fn serialize_tree(&self, request: Request<SerializeTreeReq>) -> Result<Response<SerializeTreeRes>, Status> {
+        println!("serialize_tree");
         let req = request.into_inner();
         let tree = serialize_tree(&req.group_id);
         Ok(Response::new(SerializeTreeRes { tree_bytes: tree }))
     }
 
     async fn join_group(&self, request: Request<JoinGroupReq>) -> Result<Response<Empty>, Status> {
+        println!("join_group");
         let req = request.into_inner();
         join_group(&req.client_id, &req.group_id, &req.welcome_bytes, &req.tree_bytes);
         Ok(Response::new(Empty {}))
     }
 
     async fn export_shared_secret(&self, request: Request<ExportSecretReq>) -> Result<Response<ExportSecretRes>, Status> {
+        println!("export_shared_secret");
         let req = request.into_inner();
         let secret = export_shared_secret(&req.client_id, &req.group_id, &req.label);
         Ok(Response::new(ExportSecretRes { secret_bytes: secret }))
