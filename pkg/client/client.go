@@ -95,43 +95,82 @@ func sendMsg(serverURL, to, msgType, from string, epoch uint64, groupID string, 
 }
 
 func (c *ClientImpl) Init(name, brokerURL string) error {
+	logrus.Infof("------------------------------ Init")
 	c.name = name
 	c.serverURL = brokerURL
+	logrus.Infof("poi1")
 
 	grpcURL := os.Getenv("RUST_GRPC_URL")
 	conn, err := grpc.NewClient(grpcURL, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return fmt.Errorf("failed to connect to grpc: %v", err)
 	}
+	logrus.Infof("poi2")
 	c.grpcClient = pb.NewMlsServiceClient(conn)
 	ctx := context.Background()
 
+	logrus.Infof("poi3")
 	c.grpcClient.GenerateCredential(ctx, &pb.GenerateReq{ClientId: name})
 
-	kpRes, _ := c.grpcClient.GenerateKeyPackage(ctx, &pb.GenerateReq{ClientId: name})
+	logrus.Infof("poi4")
+	// Generate Credential
+	_, err = c.grpcClient.GenerateCredential(ctx, &pb.GenerateReq{ClientId: name})
+	if err != nil {
+		return fmt.Errorf("failed to generate credential: %v", err)
+	}
+	logrus.Infof("poi4.1")
+
+	// Generate Key Package
+	kpRes, err := c.grpcClient.GenerateKeyPackage(ctx, &pb.GenerateReq{ClientId: name})
+	if err != nil {
+		return fmt.Errorf("failed to generate key package: %v", err) // This will tell you exactly why it can't connect
+	}
+	logrus.Infof("poi4.2")
+
 	pubKey := []byte(kpRes.KeyPackageHex)
 
+	logrus.Infof("poi5")
 	url := fmt.Sprintf("%s/upload_kp?user=%s", brokerURL, name)
+
+	// Create a client with a strict timeout so it fails fast instead of hanging
+	httpClient := &http.Client{
+		Timeout: 3 * time.Second,
+	}
+
 	for {
-		resp, err := http.Post(url, "application/octet-stream", bytes.NewBuffer(pubKey))
-		if err == nil && resp.StatusCode == http.StatusOK {
-			break
+		resp, err := httpClient.Post(url, "application/octet-stream", bytes.NewBuffer(pubKey))
+
+		if err != nil {
+			logrus.Infof("[%s] Broker not reachable yet: %v\n", c.name, err)
+		} else {
+			// You MUST close the body to prevent connection pool exhaustion
+			resp.Body.Close()
+
+			if resp.StatusCode == http.StatusOK {
+				break
+			}
+			logrus.Infof("[%s] Broker returned status %d, waiting...\n", c.name, resp.StatusCode)
 		}
-		logrus.Infof("[%s] Waiting for broker to come online...\n", c.name)
+		logrus.Infof("poi6")
+
 		time.Sleep(1 * time.Second)
 	}
 
+	logrus.Infof("poi7")
 	c.startListener()
+	logrus.Infof("poi8")
 	return nil
 }
 
 func (c *ClientImpl) Subscribe(vni uint32) error {
+	logrus.Infof("------------------------------ Subscribe")
 	url := fmt.Sprintf("%s/subscribe?user=%s&id=%d", c.serverURL, c.name, vni)
 	http.Get(url)
 	return nil
 }
 
 func (c *ClientImpl) CreateGroup(groupName string, vni uint32) error {
+	logrus.Infof("------------------------------ CreateGroup")
 	groupID := strconv.FormatUint(uint64(rand.Uint32()), 10)
 
 	c.grpcClient.CreateGroup(context.Background(), &pb.CreateGroupReq{
@@ -147,6 +186,7 @@ func (c *ClientImpl) CreateGroup(groupName string, vni uint32) error {
 }
 
 func (c *ClientImpl) InviteMember(groupID string, peerName string) {
+	logrus.Infof("------------------------------ InviteMember")
 	resp, _ := http.Get(fmt.Sprintf("%s/get_kp?user=%s", c.serverURL, peerName))
 	peerPubKey, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
@@ -179,6 +219,7 @@ func (c *ClientImpl) InviteMember(groupID string, peerName string) {
 }
 
 func (c *ClientImpl) processCommit(groupID string, env Envelope) {
+	logrus.Infof("------------------------------ processCommit")
 	expectedEpoch := groupEpochs[groupID]
 
 	if env.Epoch > expectedEpoch {
@@ -197,7 +238,7 @@ func (c *ClientImpl) processCommit(groupID string, env Envelope) {
 		groupEpochs[groupID] = expectedEpoch + 1
 		secret, _ := c.GetSharedSecret(groupID)
 
-		logrus.Infof("[%s] Tree Updated (Epoch %d). GroupKey Preview: %x\n", c.name, expectedEpoch+1, secret[:4])
+		logrus.Infof("----------------- [%s] Tree Updated (Epoch %d). GroupKey Preview: %x\n", c.name, expectedEpoch+1, secret[:4])
 
 		msgData, _ := json.Marshal(AppMessage{
 			Action:        "Epoch updated successfully",
@@ -228,7 +269,7 @@ func (c *ClientImpl) handleEvent(env Envelope) {
 	case "add_request":
 		var req map[string]string
 		json.Unmarshal(env.Data, &req)
-		logrus.Infof("[%s] Orchestrator mandated invite of %s to Group %s\n", c.name, req["user"], req["group_id"])
+		logrus.Infof("----------------- [%s] Orchestrator mandated invite of %s to Group %s\n", c.name, req["user"], req["group_id"])
 		c.InviteMember(req["group_id"], req["user"])
 
 	case "invite_payload":
@@ -245,7 +286,7 @@ func (c *ClientImpl) handleEvent(env Envelope) {
 		groupEpochs[env.GroupID] = inv.Epoch
 		secret, _ := c.GetSharedSecret(env.GroupID)
 
-		logrus.Infof("[%s] Joined Group %s! GroupKey Preview: %x\n", c.name, env.GroupID, secret[:4])
+		logrus.Infof("----------------- [%s] Joined Group %s! GroupKey Preview: %x\n", c.name, env.GroupID, secret[:4])
 
 		msgData, _ := json.Marshal(AppMessage{
 			Action: "Joined successfully", GroupID: env.GroupID, SecretPreview: hex.EncodeToString(secret[:4]),
@@ -258,6 +299,6 @@ func (c *ClientImpl) handleEvent(env Envelope) {
 	case "app_message":
 		var appMsg AppMessage
 		json.Unmarshal(env.Data, &appMsg)
-		logrus.Infof("[%s] (Decrypted via MLS) Message from %s: Action='%s', GroupKey Match Verification: %s\n", c.name, env.From, appMsg.Action, appMsg.SecretPreview)
+		logrus.Infof("----------------- [%s] (Decrypted via MLS) Message from %s: Action='%s', GroupKey Match Verification: %s\n", c.name, env.From, appMsg.Action, appMsg.SecretPreview)
 	}
 }

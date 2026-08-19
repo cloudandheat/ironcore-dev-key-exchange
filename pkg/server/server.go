@@ -142,12 +142,12 @@ func (s *ServerImpl) handleSubscribe(w http.ResponseWriter, r *http.Request) {
 	groupsToNotify = append(groupsToNotify, s.groups[id]...)
 	s.mu.Unlock()
 
-	logrus.Infof("[Broker] User '%s' subscribed to vni %d\n", user, id)
+	logrus.Infof("----------------- [Broker] User '%s' subscribed to vni %d\n", user, id)
 
 	// Process notifications strictly outside the lock
 	for _, g := range groupsToNotify {
 		if g.Initiator != user {
-			logrus.Infof("[Broker] Automatically requesting %s to invite new subscriber %s to group %s\n", g.Initiator, user, g.GroupID)
+			logrus.Infof("----------------- [Broker] Automatically requesting %s to invite new subscriber %s to group %s\n", g.Initiator, user, g.GroupID)
 			req, _ := json.Marshal(AddRequest{User: user, GroupID: g.GroupID})
 
 			s.mu.Lock()
@@ -178,7 +178,7 @@ func (s *ServerImpl) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
 	subsToNotify = append(subsToNotify, s.subscriptions[id]...)
 	s.mu.Unlock()
 
-	logrus.Infof("[Broker] Group '%s' created on vni %d by %s\n", groupName, id, user)
+	logrus.Infof("----------------- [Broker] Group '%s' created on vni %d by %s\n", groupName, id, user)
 
 	// Notify strictly outside the lock
 	for _, subUser := range subsToNotify {
