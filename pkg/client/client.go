@@ -193,9 +193,15 @@ func (c *ClientImpl) InviteMember(groupID string, peerName string) {
 
 	currentEpoch := groupEpochs[groupID]
 
-	res, _ := c.grpcClient.InviteMembers(context.Background(), &pb.InviteReq{
+	res, err := c.grpcClient.InviteMembers(context.Background(), &pb.InviteReq{
 		ClientId: c.name, GroupId: groupID, TargetKpHex: string(peerPubKey),
 	})
+
+	// Catch the safe error coming from Rust!
+	if err != nil {
+		fmt.Printf("(------------------------------ [%s] Failed to invite %s: %v\n", c.name, peerName, err)
+		return
+	}
 
 	treeRes, _ := c.grpcClient.SerializeTree(context.Background(), &pb.SerializeTreeReq{GroupId: groupID})
 
@@ -231,9 +237,14 @@ func (c *ClientImpl) processCommit(groupID string, env Envelope) {
 	}
 
 	if env.Epoch == expectedEpoch {
-		c.grpcClient.ProcessCommit(context.Background(), &pb.ProcessCommitReq{
+		_, err := c.grpcClient.ProcessCommit(context.Background(), &pb.ProcessCommitReq{
 			ClientId: c.name, GroupId: groupID, CommitBytes: env.Data,
 		})
+
+		if err != nil {
+			fmt.Printf("----------------- [%s] Failed to process commit in epoch %d: %v\n", c.name, env.Epoch, err)
+			return
+		}
 
 		groupEpochs[groupID] = expectedEpoch + 1
 		secret, _ := c.GetSharedSecret(groupID)
@@ -275,13 +286,19 @@ func (c *ClientImpl) handleEvent(env Envelope) {
 	case "invite_payload":
 		var inv InvitePayload
 		json.Unmarshal(env.Data, &inv)
+		logrus.Infof("----------------- [%s] handle invide", c.name)
 
 		wBytes, _ := base64.StdEncoding.DecodeString(inv.Welcome)
 		tBytes, _ := base64.StdEncoding.DecodeString(inv.Tree)
 
-		c.grpcClient.JoinGroup(context.Background(), &pb.JoinGroupReq{
+		_, err := c.grpcClient.JoinGroup(context.Background(), &pb.JoinGroupReq{
 			ClientId: c.name, GroupId: env.GroupID, WelcomeBytes: wBytes, TreeBytes: tBytes,
 		})
+
+		if err != nil {
+			fmt.Printf("----------------- [%s] Failed to process join; %v\n", c.name, err)
+			return
+		}
 
 		groupEpochs[env.GroupID] = inv.Epoch
 		secret, _ := c.GetSharedSecret(env.GroupID)
