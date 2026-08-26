@@ -25,64 +25,74 @@ static CLIENT_GROUPS: OnceLock<Mutex<HashMap<String, MlsGroup>>> = OnceLock::new
 
 pub fn get_provider(
     client_id: &String,
-) -> Arc<(OpenMlsRustCrypto, CredentialWithKey, SignatureKeyPair)> {
+) -> Result<Arc<(OpenMlsRustCrypto, CredentialWithKey, SignatureKeyPair)>, Status> {
     let map_lock = CLIENT_IDENTITIES.get_or_init(|| Mutex::new(HashMap::new()));
-    let hashmap = map_lock.lock().unwrap();
-    hashmap
+    let hashmap = map_lock
+        .lock()
+        .map_err(|_| Status::internal("Failed to acquire identity lock"))?;
+    let provider = hashmap
         .get(client_id)
-        .expect("{client_id} not found.")
-        .clone()
+        .ok_or_else(|| Status::not_found(format!("Client {} not found.", client_id)))?;
+    Ok(provider.clone())
 }
 
 pub fn insert_provider(
     client_id: &String,
     crypto: (OpenMlsRustCrypto, CredentialWithKey, SignatureKeyPair),
-) {
+) -> Result<(), Status> {
     let map_lock = CLIENT_IDENTITIES.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut hashmap = map_lock.lock().unwrap();
+    let mut hashmap = map_lock
+        .lock()
+        .map_err(|_| Status::internal("Failed to acquire identity lock"))?;
     hashmap.insert(client_id.clone(), Arc::new(crypto));
+    Ok(())
 }
 
-pub fn insert_group(group_id: &String, group: MlsGroup) {
+pub fn insert_group(group_id: &String, group: MlsGroup) -> Result<(), Status> {
     let map_lock = CLIENT_GROUPS.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut hashmap = map_lock.lock().unwrap();
+    let mut hashmap = map_lock
+        .lock()
+        .map_err(|_| Status::internal("Failed to acquire group lock"))?;
     hashmap.insert(group_id.clone(), group);
+    Ok(())
 }
 
-fn create_group(client_id: &String, group_id: &String) {
-    let provider = get_provider(client_id);
+fn create_group(client_id: &String, group_id: &String) -> Result<(), Status> {
+    let provider = get_provider(client_id)?;
     let group = MlsGroup::new(
         &provider.0,
         &provider.2,
         &MlsGroupCreateConfig::default(),
         provider.1.clone(),
     )
-    .expect("Failed to create MLS group");
-    insert_group(group_id, group);
+    .map_err(|e| Status::internal(format!("Failed to create MLS group: {:?}", e)))?;
+    
+    insert_group(group_id, group)
 }
 
 fn invite_members(
     client_id: &String,
     group_id: &String,
     target_kp_hex: String,
-) -> Result<(Vec<u8>, Vec<u8>), String> {
-    let provider = get_provider(client_id);
-
-    // 1. Do dangerous deserialization OUTSIDE the lock
-    let kp_bytes = hex::decode(target_kp_hex).map_err(|e| format!("Invalid hex: {}", e))?;
-    let key_package_in = KeyPackageIn::tls_deserialize(&mut kp_bytes.as_slice())
-        .map_err(|e| format!("Failed to deserialize KeyPackageIn: {:?}", e))?;
-    let key_package = key_package_in
-        .validate(provider.0.crypto(), ProtocolVersion::Mls10)
-        .map_err(|e| format!("Failed to validate KeyPackage: {:?}", e))?;
-
-    // 2. Lock groups safely (recovering from poison if necessary)
+) -> Result<(Vec<u8>, Vec<u8>), Status> {
+    let provider = get_provider(client_id)?;
     let mut groups = CLIENT_GROUPS
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
-        .unwrap_or_else(|e| e.into_inner());
+        .map_err(|_| Status::internal("Failed to acquire group lock"))?;
+    let group = groups
+        .get_mut(group_id)
+        .ok_or_else(|| Status::not_found("Group not found"))?;
 
-    let group = groups.get_mut(group_id).ok_or("Group not found")?;
+    let kp_bytes = hex::decode(target_kp_hex)
+        .map_err(|e| Status::invalid_argument(format!("Invalid hex: {:?}", e)))?;
+    
+    let key_package_in = KeyPackageIn::tls_deserialize(&mut kp_bytes.as_slice())
+        .map_err(|e| Status::invalid_argument(format!("Failed to deserialize KeyPackageIn: {:?}", e)))?;
+    
+    let key_package = key_package_in
+        .validate(provider.0.crypto(), ProtocolVersion::Mls10)
+        .map_err(|e| Status::invalid_argument(format!("Failed to validate KeyPackage: {:?}", e)))?;
 
     let (mls_message_out, welcome_out, _group_info) = group
         .add_members(
@@ -90,51 +100,51 @@ fn invite_members(
             &provider.2,
             core::slice::from_ref(&key_package),
         )
-        .map_err(|e| format!("Could not add members: {:?}", e))?;
+        .map_err(|e| Status::internal(format!("Could not add members: {:?}", e)))?;
 
     group
         .merge_pending_commit(&provider.0)
-        .map_err(|e| format!("Error merging pending commit: {:?}", e))?;
+        .map_err(|e| Status::internal(format!("Error merging pending commit: {:?}", e)))?;
 
-    let welcome_bytes = welcome_out.tls_serialize_detached().unwrap();
-    let commit_bytes = mls_message_out.tls_serialize_detached().unwrap();
+    let welcome_bytes = welcome_out
+        .tls_serialize_detached()
+        .map_err(|e| Status::internal(format!("Error serializing welcome: {:?}", e)))?;
+    let commit_bytes = mls_message_out
+        .tls_serialize_detached()
+        .map_err(|e| Status::internal(format!("Error serializing commit: {:?}", e)))?;
 
     Ok((welcome_bytes, commit_bytes))
 }
 
-fn process_commit(client_id: &String, group_id: &String, commit_bytes: &[u8]) -> Result<(), String> {
-    let provider = get_provider(client_id);
-    let mut commit_slice = commit_bytes;
-    
-    let mls_message_in = MlsMessageIn::tls_deserialize(&mut commit_slice)
-        .map_err(|e| format!("Error des commit: {:?}", e))?;
-
-    let protocol_message: ProtocolMessage = match mls_message_in.extract() {
-        MlsMessageBodyIn::PublicMessage(pm) => pm.into(),
-        MlsMessageBodyIn::PrivateMessage(pm) => pm.into(),
-        _ => return Err("Expected a PublicMessage or PrivateMessage for a commit".to_string()),
-    };
-
+fn remove_member(client_id: &String, group_id: &String, target_client_id: &String) -> Result<Vec<u8>, Status> {
+    let provider = get_provider(client_id)?;
     let mut groups = CLIENT_GROUPS
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
-        .unwrap_or_else(|e| e.into_inner());
-        
-    let group = groups.get_mut(group_id).ok_or("Group not found")?;
+        .map_err(|_| Status::internal("Failed to acquire group lock"))?;
+    let group = groups
+        .get_mut(group_id)
+        .ok_or_else(|| Status::not_found("Group not found"))?;
 
-    let processed_message = group
-        .process_message(&provider.0, protocol_message)
-        .map_err(|e| format!("Failed to process message: {:?}", e))?;
+    let target_identity = target_client_id.clone().into_bytes();
+    let expected_credential: Credential = BasicCredential::new(target_identity).into();
 
-    match processed_message.into_content() {
-        ProcessedMessageContent::StagedCommitMessage(staged_commit) => {
-            group
-                .merge_staged_commit(&provider.0, *staged_commit)
-                .map_err(|e| format!("Failed to merge staged commit: {:?}", e))?;
-            Ok(())
-        }
-        _ => Err("Expected a StagedCommitMessage".to_string()),
-    }
+    let target_index = group.members()
+        .find(|member| member.credential == expected_credential)
+        .map(|member| member.index)
+        .ok_or_else(|| Status::not_found("Target member not found in group"))?;
+
+    let (mls_message_out, _welcome_out, _group_info) = group
+        .remove_members(&provider.0, &provider.2, &[target_index])
+        .map_err(|e| Status::internal(format!("Could not remove member: {:?}", e)))?;
+
+    group
+        .merge_pending_commit(&provider.0)
+        .map_err(|e| Status::internal(format!("Error merging pending commit: {:?}", e)))?;
+
+    mls_message_out
+        .tls_serialize_detached()
+        .map_err(|e| Status::internal(format!("Error serializing commit: {:?}", e)))
 }
 
 fn join_group(
@@ -142,17 +152,17 @@ fn join_group(
     group_id: &String,
     serialized_welcome: &[u8],
     serialized_tree: &[u8],
-) -> Result<(), String> {
-    let provider = get_provider(client_id);
+) -> Result<(), Status> {
+    let provider = get_provider(client_id)?;
     let mut welcome_slice = serialized_welcome;
     
     let mls_message_in = MlsMessageIn::tls_deserialize(&mut welcome_slice)
-        .map_err(|e| format!("Error des welcome: {:?}", e))?;
-    let ratchet_tree = deserialize_tree(serialized_tree);
-    
+        .map_err(|e| Status::invalid_argument(format!("Error des welcome: {:?}", e)))?;
+        
+    let ratchet_tree = deserialize_tree(serialized_tree)?;
     let welcome = match mls_message_in.extract() {
         MlsMessageBodyIn::Welcome(welcome) => welcome,
-        _ => return Err("Unexpected message type.".to_string()),
+        _ => return Err(Status::invalid_argument("Unexpected message type.")),
     };
 
     let staged_join = StagedWelcome::new_from_welcome(
@@ -160,39 +170,73 @@ fn join_group(
         &MlsGroupJoinConfig::default(),
         welcome,
         Some(ratchet_tree),
-    ).map_err(|e| format!("Error creating a staged join: {:?}", e))?;
+    )
+    .map_err(|e| Status::internal(format!("Error creating a staged join: {:?}", e)))?;
 
     let group = staged_join
         .into_group(&provider.0)
-        .map_err(|e| format!("Error creating group from join: {:?}", e))?;
+        .map_err(|e| Status::internal(format!("Error creating group from join: {:?}", e)))?;
         
+    insert_group(group_id, group)
+}
+
+fn process_commit(client_id: &String, group_id: &String, commit_bytes: &[u8]) -> Result<(), Status> {
+    let provider = get_provider(client_id)?;
     let mut groups = CLIENT_GROUPS
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    groups.insert(group_id.clone(), group);
+        .map_err(|_| Status::internal("Failed to acquire group lock"))?;
+    let group = groups
+        .get_mut(group_id)
+        .ok_or_else(|| Status::not_found("Group not found"))?;
+
+    let mut commit_slice = commit_bytes;
+    let mls_message_in = MlsMessageIn::tls_deserialize(&mut commit_slice)
+        .map_err(|e| Status::invalid_argument(format!("Error des commit: {:?}", e)))?;
+
+    let protocol_message: ProtocolMessage = match mls_message_in.extract() {
+        MlsMessageBodyIn::PublicMessage(pm) => pm.into(),
+        MlsMessageBodyIn::PrivateMessage(pm) => pm.into(),
+        _ => return Err(Status::invalid_argument("Expected a PublicMessage or PrivateMessage for a commit")),
+    };
+
+    let processed_message = group
+        .process_message(&provider.0, protocol_message)
+        .map_err(|e| Status::internal(format!("Failed to process message: {:?}", e)))?;
+
+    match processed_message.into_content() {
+        ProcessedMessageContent::StagedCommitMessage(staged_commit) => {
+            group
+                .merge_staged_commit(&provider.0, *staged_commit)
+                .map_err(|e| Status::internal(format!("Failed to merge staged commit: {:?}", e)))?;
+        }
+        _ => return Err(Status::invalid_argument("Expected a StagedCommitMessage")),
+    }
     
     Ok(())
 }
 
-fn export_shared_secret(client_id: &String, group_id: &String, label: &str) -> Vec<u8> {
-    let provider = get_provider(client_id);
+fn export_shared_secret(client_id: &String, group_id: &String, label: &str) -> Result<Vec<u8>, Status> {
+    let provider = get_provider(client_id)?;
     let mut groups = CLIENT_GROUPS
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
-        .unwrap();
-    let group = groups.get(group_id).expect("Group not found");
+        .map_err(|_| Status::internal("Failed to acquire group lock"))?;
+    let group = groups
+        .get(group_id)
+        .ok_or_else(|| Status::not_found("Group not found"))?;
+        
     group
         .export_secret(provider.0.crypto(), label, b"context", 32)
-        .expect("Failed to export secret")
+        .map_err(|e| Status::internal(format!("Failed to export secret: {:?}", e)))
 }
 
-fn generate_credential_with_key(client_id: &String) {
+fn generate_credential_with_key(client_id: &String) -> Result<(), Status> {
     let provider = OpenMlsRustCrypto::default();
     let identity = client_id.clone().into_bytes();
     let credential = BasicCredential::new(identity);
-    let signature_keys =
-        SignatureKeyPair::new(CIPHERSUITE.signature_algorithm()).expect("Error gen");
+    let signature_keys = SignatureKeyPair::new(CIPHERSUITE.signature_algorithm())
+        .map_err(|e| Status::internal(format!("Error gen: {:?}", e)))?;
 
     let cred = CredentialWithKey {
         credential: credential.into(),
@@ -200,50 +244,92 @@ fn generate_credential_with_key(client_id: &String) {
     };
     signature_keys
         .store(provider.storage())
-        .expect("Error storing");
-    insert_provider(client_id, (provider, cred, signature_keys));
+        .map_err(|e| Status::internal(format!("Error storing: {:?}", e)))?;
+        
+    insert_provider(client_id, (provider, cred, signature_keys))
 }
 
-fn generate_key_package(client_id: &String) -> String {
-    let provider = get_provider(client_id);
+fn generate_key_package(client_id: &String) -> Result<String, Status> {
+    let provider = get_provider(client_id)?;
     let key_package_bundle = KeyPackage::builder()
         .build(CIPHERSUITE, &provider.0, &provider.2, provider.1.clone())
-        .expect("Failed to build KeyPackage");
+        .map_err(|e| Status::internal(format!("Failed to build KeyPackage: {:?}", e)))?;
 
     let key_package = key_package_bundle.key_package();
     let kp_hash = key_package
         .hash_ref(provider.0.crypto())
-        .expect("Failed to hash KeyPackage");
+        .map_err(|e| Status::internal(format!("Failed to hash KeyPackage: {:?}", e)))?;
+        
     provider
         .0
         .storage()
         .write_key_package(&kp_hash, &key_package_bundle)
-        .expect("Failed to store");
+        .map_err(|e| Status::internal(format!("Failed to store: {:?}", e)))?;
+        
     let kp_bytes = key_package
         .tls_serialize_detached()
-        .expect("Failed to serialize KeyPackage");
-    hex::encode(kp_bytes)
+        .map_err(|e| Status::internal(format!("Failed to serialize KeyPackage: {:?}", e)))?;
+        
+    Ok(hex::encode(kp_bytes))
 }
 
-fn deserialize_tree(serialized_tree: &[u8]) -> RatchetTreeIn {
-    RatchetTreeIn::tls_deserialize(&mut &*serialized_tree).expect("Error deserializing tree")
+fn deserialize_tree(serialized_tree: &[u8]) -> Result<RatchetTreeIn, Status> {
+    RatchetTreeIn::tls_deserialize(&mut &*serialized_tree)
+        .map_err(|e| Status::invalid_argument(format!("Error deserializing tree: {:?}", e)))
 }
 
-fn serialize_tree(group_id: &String) -> Vec<u8> {
-    let mut groups = CLIENT_GROUPS
+fn serialize_tree(group_id: &String) -> Result<Vec<u8>, Status> {
+    let groups = CLIENT_GROUPS
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
-        .unwrap();
-    let group = groups.get(group_id).expect("Group not found");
+        .map_err(|_| Status::internal("Failed to acquire group lock"))?;
+    let group = groups
+        .get(group_id)
+        .ok_or_else(|| Status::not_found("Group not found"))?;
+        
     group
         .export_ratchet_tree()
         .tls_serialize_detached()
-        .expect("Error serializing tree")
+        .map_err(|e| Status::internal(format!("Error serializing tree: {:?}", e)))
 }
 
-// ==========================================
-// gRPC WRAPPERS
-// ==========================================
+fn self_update(client_id: &String, group_id: &String) -> Result<Vec<u8>, Status> {
+    let provider = get_provider(client_id)?;
+    let mut groups = CLIENT_GROUPS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .map_err(|_| Status::internal("Failed to acquire group lock"))?;
+    let group = groups
+        .get_mut(group_id)
+        .ok_or_else(|| Status::not_found("Group not found"))?;
+
+    // 1. Pass LeafNodeParameters::default()
+    // 2. Call .into_contents() on the result to unpack the CommitMessageBundle
+    let (mls_message_out, _welcome_out, _group_info) = group
+        .self_update(&provider.0, &provider.2, LeafNodeParameters::default())
+        .map_err(|e| Status::internal(format!("Could not self update: {:?}", e)))?
+        .into_contents();
+
+    group
+        .merge_pending_commit(&provider.0)
+        .map_err(|e| Status::internal(format!("Error merging pending commit: {:?}", e)))?;
+
+    mls_message_out
+        .tls_serialize_detached()
+        .map_err(|e| Status::internal(format!("Error serializing commit: {:?}", e)))
+}
+
+// drop group from client
+fn drop_group(group_id: &String) -> Result<(), Status> {
+    let mut groups = CLIENT_GROUPS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .map_err(|_| Status::internal("Failed to acquire group lock"))?;
+    
+    // Remove the group from local memory entirely
+    groups.remove(group_id);
+    Ok(())
+}
 
 #[derive(Debug, Default)]
 pub struct BackendMlsService {}
@@ -251,65 +337,73 @@ pub struct BackendMlsService {}
 #[tonic::async_trait]
 impl MlsService for BackendMlsService {
     async fn generate_credential(&self, request: Request<GenerateReq>) -> Result<Response<Empty>, Status> {
-        println!("generate_credential");
-        generate_credential_with_key(&request.into_inner().client_id);
+        generate_credential_with_key(&request.into_inner().client_id)?;
         Ok(Response::new(Empty {}))
     }
 
     async fn generate_key_package(&self, request: Request<GenerateReq>) -> Result<Response<GenerateKeyPackageRes>, Status> {
-        println!("generate_key_package");
-        let hex = generate_key_package(&request.into_inner().client_id);
+        let hex = generate_key_package(&request.into_inner().client_id)?;
         Ok(Response::new(GenerateKeyPackageRes { key_package_hex: hex }))
     }
 
     async fn create_group(&self, request: Request<CreateGroupReq>) -> Result<Response<Empty>, Status> {
-        println!("create_group");
         let req = request.into_inner();
-        create_group(&req.client_id, &req.group_id);
+        create_group(&req.client_id, &req.group_id)?;
         Ok(Response::new(Empty {}))
     }
-    
+
     async fn invite_members(&self, request: Request<InviteReq>) -> Result<Response<InviteRes>, Status> {
         let req = request.into_inner();
-        match invite_members(&req.client_id, &req.group_id, req.target_kp_hex) {
-            Ok((welcome, commit)) => Ok(Response::new(InviteRes { welcome_bytes: welcome, commit_bytes: commit })),
-            Err(e) => Err(Status::internal(e))
-        }
+        let (welcome, commit) = invite_members(&req.client_id, &req.group_id, req.target_kp_hex)?;
+        Ok(Response::new(InviteRes { welcome_bytes: welcome, commit_bytes: commit }))
     }
 
     async fn process_commit(&self, request: Request<ProcessCommitReq>) -> Result<Response<Empty>, Status> {
         let req = request.into_inner();
-        match process_commit(&req.client_id, &req.group_id, &req.commit_bytes) {
-            Ok(_) => Ok(Response::new(Empty {})),
-            Err(e) => Err(Status::internal(e))
-        }
+        process_commit(&req.client_id, &req.group_id, &req.commit_bytes)?;
+        Ok(Response::new(Empty {}))
+    }
+
+    async fn serialize_tree(&self, request: Request<SerializeTreeReq>) -> Result<Response<SerializeTreeRes>, Status> {
+        let req = request.into_inner();
+        let tree = serialize_tree(&req.group_id)?;
+        Ok(Response::new(SerializeTreeRes { tree_bytes: tree }))
     }
 
     async fn join_group(&self, request: Request<JoinGroupReq>) -> Result<Response<Empty>, Status> {
         let req = request.into_inner();
-        match join_group(&req.client_id, &req.group_id, &req.welcome_bytes, &req.tree_bytes) {
-            Ok(_) => Ok(Response::new(Empty {})),
-            Err(e) => Err(Status::internal(e))
-        }
-    }
-    async fn serialize_tree(&self, request: Request<SerializeTreeReq>) -> Result<Response<SerializeTreeRes>, Status> {
-        println!("serialize_tree");
-        let req = request.into_inner();
-        let tree = serialize_tree(&req.group_id);
-        Ok(Response::new(SerializeTreeRes { tree_bytes: tree }))
+        join_group(&req.client_id, &req.group_id, &req.welcome_bytes, &req.tree_bytes)?;
+        Ok(Response::new(Empty {}))
     }
 
     async fn export_shared_secret(&self, request: Request<ExportSecretReq>) -> Result<Response<ExportSecretRes>, Status> {
-        println!("export_shared_secret");
         let req = request.into_inner();
-        let secret = export_shared_secret(&req.client_id, &req.group_id, &req.label);
+        let secret = export_shared_secret(&req.client_id, &req.group_id, &req.label)?;
         Ok(Response::new(ExportSecretRes { secret_bytes: secret }))
+    }
+
+    async fn remove_member(&self, request: Request<RemoveReq>) -> Result<Response<RemoveRes>, Status> {
+        let req = request.into_inner();
+        let commit_bytes = remove_member(&req.client_id, &req.group_id, &req.target_client_id)?;
+        Ok(Response::new(RemoveRes { commit_bytes }))
+    }
+
+    async fn self_update(&self, request: Request<SelfUpdateReq>) -> Result<Response<SelfUpdateRes>, Status> {
+        let req = request.into_inner();
+        let commit_bytes = self_update(&req.client_id, &req.group_id)?;
+        Ok(Response::new(SelfUpdateRes { commit_bytes }))
+    }
+
+    async fn drop_group(&self, request: Request<DropGroupReq>) -> Result<Response<Empty>, Status> {
+        let req = request.into_inner();
+        drop_group(&req.group_id)?;
+        Ok(Response::new(Empty {}))
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let addr = "[::]:50051".parse()?;
+    let addr = "0.0.0.0:50051".parse()?;
     let service = BackendMlsService::default();
     
     println!("Rust MLS gRPC Backend listening on {}", addr);
