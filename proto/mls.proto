@@ -60,6 +60,30 @@ message ExportSecretRes {
     bytes secret_bytes = 1; 
 }
 
+message RemoveReq { 
+    string client_id = 1; 
+    string group_id = 2; 
+    string target_client_id = 3; 
+}
+
+message RemoveRes { 
+    bytes commit_bytes = 1; 
+}
+
+message SelfUpdateReq { 
+    string client_id = 1; 
+    string group_id = 2; 
+}
+
+message SelfUpdateRes { 
+    bytes commit_bytes = 1; 
+}
+
+message DropGroupReq { 
+    string client_id = 1; 
+    string group_id = 2; 
+}
+
 service MlsService {
     rpc GenerateCredential(GenerateReq) returns (Empty);
     rpc GenerateKeyPackage(GenerateReq) returns (GenerateKeyPackageRes);
@@ -69,4 +93,7 @@ service MlsService {
     rpc SerializeTree(SerializeTreeReq) returns (SerializeTreeRes);
     rpc JoinGroup(JoinGroupReq) returns (Empty);
     rpc ExportSharedSecret(ExportSecretReq) returns (ExportSecretRes);
+    rpc RemoveMember(RemoveReq) returns (RemoveRes);
+    rpc SelfUpdate(SelfUpdateReq) returns (SelfUpdateRes);
+    rpc DropGroup(DropGroupReq) returns (Empty);
 }
