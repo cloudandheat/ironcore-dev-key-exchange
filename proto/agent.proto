@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+package agent;
+option go_package = "./proto";
+
+message AgentEmpty {}
+
+message AgentInitReq {
+    string client_name = 1;
+    string broker_url = 2;
+    string client_ip = 3;
+}
+
+message AgentSubscribeReq {
+    uint32 vni = 1;
+}
+
+message AgentUnsubscribeReq {
+    uint32 vni = 1;
+}
+
+service AgentService {
+    rpc Init(AgentInitReq) returns (AgentEmpty);
+    rpc Subscribe(AgentSubscribeReq) returns (AgentEmpty);
+    rpc Unsubscribe(AgentUnsubscribeReq) returns (AgentEmpty);
+}
