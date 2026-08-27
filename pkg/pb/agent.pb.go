@@ -205,6 +205,94 @@ func (x *AgentUnsubscribeReq) GetVni() uint32 {
 	return 0
 }
 
+type AgentKeyReadyReq struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Vni           uint32                 `protobuf:"varint,1,opt,name=vni,proto3" json:"vni,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AgentKeyReadyReq) Reset() {
+	*x = AgentKeyReadyReq{}
+	mi := &file_agent_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AgentKeyReadyReq) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AgentKeyReadyReq) ProtoMessage() {}
+
+func (x *AgentKeyReadyReq) ProtoReflect() protoreflect.Message {
+	mi := &file_agent_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AgentKeyReadyReq.ProtoReflect.Descriptor instead.
+func (*AgentKeyReadyReq) Descriptor() ([]byte, []int) {
+	return file_agent_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *AgentKeyReadyReq) GetVni() uint32 {
+	if x != nil {
+		return x.Vni
+	}
+	return 0
+}
+
+type AgentKeyReadyRes struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	IsReady       bool                   `protobuf:"varint,1,opt,name=is_ready,json=isReady,proto3" json:"is_ready,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AgentKeyReadyRes) Reset() {
+	*x = AgentKeyReadyRes{}
+	mi := &file_agent_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AgentKeyReadyRes) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AgentKeyReadyRes) ProtoMessage() {}
+
+func (x *AgentKeyReadyRes) ProtoReflect() protoreflect.Message {
+	mi := &file_agent_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AgentKeyReadyRes.ProtoReflect.Descriptor instead.
+func (*AgentKeyReadyRes) Descriptor() ([]byte, []int) {
+	return file_agent_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *AgentKeyReadyRes) GetIsReady() bool {
+	if x != nil {
+		return x.IsReady
+	}
+	return false
+}
+
 var File_agent_proto protoreflect.FileDescriptor
 
 const file_agent_proto_rawDesc = "" +
@@ -221,11 +309,17 @@ const file_agent_proto_rawDesc = "" +
 	"\x11AgentSubscribeReq\x12\x10\n" +
 	"\x03vni\x18\x01 \x01(\rR\x03vni\"'\n" +
 	"\x13AgentUnsubscribeReq\x12\x10\n" +
-	"\x03vni\x18\x01 \x01(\rR\x03vni2\xb6\x01\n" +
+	"\x03vni\x18\x01 \x01(\rR\x03vni\"$\n" +
+	"\x10AgentKeyReadyReq\x12\x10\n" +
+	"\x03vni\x18\x01 \x01(\rR\x03vni\"-\n" +
+	"\x10AgentKeyReadyRes\x12\x19\n" +
+	"\bis_ready\x18\x01 \x01(\bR\aisReady2\xf6\x01\n" +
 	"\fAgentService\x12.\n" +
 	"\x04Init\x12\x13.agent.AgentInitReq\x1a\x11.agent.AgentEmpty\x128\n" +
 	"\tSubscribe\x12\x18.agent.AgentSubscribeReq\x1a\x11.agent.AgentEmpty\x12<\n" +
-	"\vUnsubscribe\x12\x1a.agent.AgentUnsubscribeReq\x1a\x11.agent.AgentEmptyB\tZ\a./protob\x06proto3"
+	"\vUnsubscribe\x12\x1a.agent.AgentUnsubscribeReq\x1a\x11.agent.AgentEmpty\x12>\n" +
+	"\n" +
+	"IsKeyReady\x12\x17.agent.AgentKeyReadyReq\x1a\x17.agent.AgentKeyReadyResB\tZ\a./protob\x06proto3"
 
 var (
 	file_agent_proto_rawDescOnce sync.Once
@@ -239,22 +333,26 @@ func file_agent_proto_rawDescGZIP() []byte {
 	return file_agent_proto_rawDescData
 }
 
-var file_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
+var file_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
 var file_agent_proto_goTypes = []any{
 	(*AgentEmpty)(nil),          // 0: agent.AgentEmpty
 	(*AgentInitReq)(nil),        // 1: agent.AgentInitReq
 	(*AgentSubscribeReq)(nil),   // 2: agent.AgentSubscribeReq
 	(*AgentUnsubscribeReq)(nil), // 3: agent.AgentUnsubscribeReq
+	(*AgentKeyReadyReq)(nil),    // 4: agent.AgentKeyReadyReq
+	(*AgentKeyReadyRes)(nil),    // 5: agent.AgentKeyReadyRes
 }
 var file_agent_proto_depIdxs = []int32{
 	1, // 0: agent.AgentService.Init:input_type -> agent.AgentInitReq
 	2, // 1: agent.AgentService.Subscribe:input_type -> agent.AgentSubscribeReq
 	3, // 2: agent.AgentService.Unsubscribe:input_type -> agent.AgentUnsubscribeReq
-	0, // 3: agent.AgentService.Init:output_type -> agent.AgentEmpty
-	0, // 4: agent.AgentService.Subscribe:output_type -> agent.AgentEmpty
-	0, // 5: agent.AgentService.Unsubscribe:output_type -> agent.AgentEmpty
-	3, // [3:6] is the sub-list for method output_type
-	0, // [0:3] is the sub-list for method input_type
+	4, // 3: agent.AgentService.IsKeyReady:input_type -> agent.AgentKeyReadyReq
+	0, // 4: agent.AgentService.Init:output_type -> agent.AgentEmpty
+	0, // 5: agent.AgentService.Subscribe:output_type -> agent.AgentEmpty
+	0, // 6: agent.AgentService.Unsubscribe:output_type -> agent.AgentEmpty
+	5, // 7: agent.AgentService.IsKeyReady:output_type -> agent.AgentKeyReadyRes
+	4, // [4:8] is the sub-list for method output_type
+	0, // [0:4] is the sub-list for method input_type
 	0, // [0:0] is the sub-list for extension type_name
 	0, // [0:0] is the sub-list for extension extendee
 	0, // [0:0] is the sub-list for field type_name
@@ -271,7 +369,7 @@ func file_agent_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_agent_proto_rawDesc), len(file_agent_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   4,
+			NumMessages:   6,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

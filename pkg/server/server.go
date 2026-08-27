@@ -62,6 +62,8 @@ func NewServer() *ServerImpl {
 	}
 }
 
+// getMailbox assumes the caller holds at least a read lock if only reading,
+// but since it creates a map entry on demand, it must only be called while holding s.mu.Lock()
 func (s *ServerImpl) getMailbox(user string) chan Envelope {
 	if s.mailboxes[user] == nil {
 		s.mailboxes[user] = make(chan Envelope, 1000)
@@ -86,7 +88,7 @@ func (s *ServerImpl) sendHandler(w http.ResponseWriter, r *http.Request) {
 	ch := s.getMailbox(to)
 	s.mu.Unlock()
 
-	ch <- env
+	ch <- env // Channel sending is thread-safe
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -135,6 +137,7 @@ func (s *ServerImpl) uploadKP(w http.ResponseWriter, r *http.Request) {
 
 func (s *ServerImpl) getKP(w http.ResponseWriter, r *http.Request) {
 	user := r.URL.Query().Get("user")
+
 	s.mu.RLock()
 	data, exists := s.keyPackages[user]
 	s.mu.RUnlock()
@@ -168,24 +171,27 @@ func (s *ServerImpl) handleSubscribe(w http.ResponseWriter, r *http.Request) {
 		group = s.groups[id]
 		isCreator = false
 	}
+
+	initiator := group.Initiator
+	groupID := group.GroupID
+	var ch chan Envelope
+
+	if !isCreator {
+		ch = s.getMailbox(initiator)
+	}
 	s.mu.Unlock()
 
 	if isCreator {
-		logrus.Infof("----------------- [Broker] User '%s' is first on VNI %d, created Group %s\n", user, id, group.GroupID)
-		json.NewEncoder(w).Encode(BrokerResp{Status: "created", GroupID: group.GroupID})
+		logrus.Infof("----------------- [Broker] User '%s' is first on VNI %d, created Group %s\n", user, id, groupID)
+		json.NewEncoder(w).Encode(BrokerResp{Status: "created", GroupID: groupID})
 		return
 	}
 
-	logrus.Infof("----------------- [Broker] Requesting '%s' to invite '%s' to VNI %d\n", group.Initiator, user, id)
-	req, _ := json.Marshal(AddRequest{User: user, GroupID: group.GroupID})
+	logrus.Infof("----------------- [Broker] Requesting '%s' to invite '%s' to VNI %d\n", initiator, user, id)
+	req, _ := json.Marshal(AddRequest{User: user, GroupID: groupID})
+	ch <- Envelope{Type: "add_request", From: "broker", GroupID: groupID, Data: req}
 
-	s.mu.Lock()
-	ch := s.getMailbox(group.Initiator)
-	s.mu.Unlock()
-
-	ch <- Envelope{Type: "add_request", From: "broker", GroupID: group.GroupID, Data: req}
-
-	json.NewEncoder(w).Encode(BrokerResp{Status: "joined", GroupID: group.GroupID})
+	json.NewEncoder(w).Encode(BrokerResp{Status: "joined", GroupID: groupID})
 }
 
 func (s *ServerImpl) handleUnsubscribe(w http.ResponseWriter, r *http.Request) {
@@ -201,55 +207,72 @@ func (s *ServerImpl) handleUnsubscribe(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.subscriptions[id] = newSubs
+
 	group := s.groups[id]
-	s.mu.Unlock()
+	var initiator string
+	var groupID string
+	var ch chan Envelope
 
 	if group != nil {
-		initiator := group.Initiator
-		if initiator == user {
-			s.mu.RLock()
+		groupID = group.GroupID
+		// If the exiting user is the initiator, rotate initiator to the next available user
+		if group.Initiator == user {
 			if len(s.subscriptions[id]) > 0 {
-				initiator = s.subscriptions[id][0].User
+				group.Initiator = s.subscriptions[id][0].User
+			} else {
+				group.Initiator = "" // Nobody left
 			}
-			s.mu.RUnlock()
 		}
 
+		initiator = group.Initiator
+		if initiator != "" {
+			ch = s.getMailbox(initiator)
+		}
+	}
+	s.mu.Unlock()
+
+	if initiator != "" {
 		logrus.Infof("----------------- [Broker] User '%s' unsubscribed from VNI %d. Mandating %s to issue remove commit.\n", user, id, initiator)
-		req, _ := json.Marshal(map[string]string{"user": user, "group_id": group.GroupID})
-
-		s.mu.Lock()
-		ch := s.getMailbox(initiator)
-		s.mu.Unlock()
-
-		ch <- Envelope{Type: "remove_request", From: "broker", GroupID: group.GroupID, Data: req}
+		req, _ := json.Marshal(map[string]string{"user": user, "group_id": groupID})
+		ch <- Envelope{Type: "remove_request", From: "broker", GroupID: groupID, Data: req}
 	}
 	w.WriteHeader(http.StatusOK)
 }
 
-// Add this method to ServerImpl
 func (s *ServerImpl) startKeyRotationLoop() {
 	ticker := time.NewTicker(60 * time.Second)
 	for range ticker.C {
 		s.mu.Lock()
-		var mandates []struct{ user, group string }
+		var mandates []struct {
+			user  string
+			group string
+			ch    chan Envelope
+		}
 
 		// Find one member per active group to mandate the update
 		for _, group := range s.groups {
 			if subs, ok := s.subscriptions[group.VNI]; ok && len(subs) > 0 {
-				// Just pick the first available subscriber in the group to execute the rotation
+				// Pick the first available subscriber in the group to execute the rotation
 				targetUser := subs[0].User
-				mandates = append(mandates, struct{ user, group string }{targetUser, group.GroupID})
+				mandates = append(mandates, struct {
+					user  string
+					group string
+					ch    chan Envelope
+				}{
+					user:  targetUser,
+					group: group.GroupID,
+					ch:    s.getMailbox(targetUser),
+				})
 			}
 		}
+		s.mu.Unlock()
 
-		// Dispatch the mandates
+		// Dispatch the mandates outside of lock
 		for _, m := range mandates {
 			logrus.Infof("----------------- [Broker] Triggering 60s key rotation. Mandating %s to update Group %s", m.user, m.group)
 			req, _ := json.Marshal(map[string]string{"group_id": m.group})
-			ch := s.getMailbox(m.user)
-			ch <- Envelope{Type: "update_request", From: "broker", GroupID: m.group, Data: req}
+			m.ch <- Envelope{Type: "update_request", From: "broker", GroupID: m.group, Data: req}
 		}
-		s.mu.Unlock()
 	}
 }
 
@@ -264,9 +287,8 @@ func (s *ServerImpl) Start(port string) error {
 	mux.HandleFunc("/subscribe", s.handleSubscribe)
 	mux.HandleFunc("/unsubscribe", s.handleUnsubscribe)
 
-	// Start the asynchronous rotation thread
-	// TODO: fix it: group creator is not updated
-	// go s.startKeyRotationLoop()
+	// Fixed and enabled the background key rotation loop
+	go s.startKeyRotationLoop()
 
 	return http.ListenAndServe(port, mux)
 }
