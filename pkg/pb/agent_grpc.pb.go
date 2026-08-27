@@ -22,6 +22,7 @@ const (
 	AgentService_Init_FullMethodName        = "/agent.AgentService/Init"
 	AgentService_Subscribe_FullMethodName   = "/agent.AgentService/Subscribe"
 	AgentService_Unsubscribe_FullMethodName = "/agent.AgentService/Unsubscribe"
+	AgentService_IsKeyReady_FullMethodName  = "/agent.AgentService/IsKeyReady"
 )
 
 // AgentServiceClient is the client API for AgentService service.
@@ -31,6 +32,7 @@ type AgentServiceClient interface {
 	Init(ctx context.Context, in *AgentInitReq, opts ...grpc.CallOption) (*AgentEmpty, error)
 	Subscribe(ctx context.Context, in *AgentSubscribeReq, opts ...grpc.CallOption) (*AgentEmpty, error)
 	Unsubscribe(ctx context.Context, in *AgentUnsubscribeReq, opts ...grpc.CallOption) (*AgentEmpty, error)
+	IsKeyReady(ctx context.Context, in *AgentKeyReadyReq, opts ...grpc.CallOption) (*AgentKeyReadyRes, error)
 }
 
 type agentServiceClient struct {
@@ -71,6 +73,16 @@ func (c *agentServiceClient) Unsubscribe(ctx context.Context, in *AgentUnsubscri
 	return out, nil
 }
 
+func (c *agentServiceClient) IsKeyReady(ctx context.Context, in *AgentKeyReadyReq, opts ...grpc.CallOption) (*AgentKeyReadyRes, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AgentKeyReadyRes)
+	err := c.cc.Invoke(ctx, AgentService_IsKeyReady_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // AgentServiceServer is the server API for AgentService service.
 // All implementations must embed UnimplementedAgentServiceServer
 // for forward compatibility.
@@ -78,6 +90,7 @@ type AgentServiceServer interface {
 	Init(context.Context, *AgentInitReq) (*AgentEmpty, error)
 	Subscribe(context.Context, *AgentSubscribeReq) (*AgentEmpty, error)
 	Unsubscribe(context.Context, *AgentUnsubscribeReq) (*AgentEmpty, error)
+	IsKeyReady(context.Context, *AgentKeyReadyReq) (*AgentKeyReadyRes, error)
 	mustEmbedUnimplementedAgentServiceServer()
 }
 
@@ -96,6 +109,9 @@ func (UnimplementedAgentServiceServer) Subscribe(context.Context, *AgentSubscrib
 }
 func (UnimplementedAgentServiceServer) Unsubscribe(context.Context, *AgentUnsubscribeReq) (*AgentEmpty, error) {
 	return nil, status.Error(codes.Unimplemented, "method Unsubscribe not implemented")
+}
+func (UnimplementedAgentServiceServer) IsKeyReady(context.Context, *AgentKeyReadyReq) (*AgentKeyReadyRes, error) {
+	return nil, status.Error(codes.Unimplemented, "method IsKeyReady not implemented")
 }
 func (UnimplementedAgentServiceServer) mustEmbedUnimplementedAgentServiceServer() {}
 func (UnimplementedAgentServiceServer) testEmbeddedByValue()                      {}
@@ -172,6 +188,24 @@ func _AgentService_Unsubscribe_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _AgentService_IsKeyReady_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AgentKeyReadyReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServiceServer).IsKeyReady(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: AgentService_IsKeyReady_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServiceServer).IsKeyReady(ctx, req.(*AgentKeyReadyReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // AgentService_ServiceDesc is the grpc.ServiceDesc for AgentService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -190,6 +224,10 @@ var AgentService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Unsubscribe",
 			Handler:    _AgentService_Unsubscribe_Handler,
+		},
+		{
+			MethodName: "IsKeyReady",
+			Handler:    _AgentService_IsKeyReady_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
