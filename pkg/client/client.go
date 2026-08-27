@@ -46,6 +46,21 @@ func (ac *AgentClient) Unsubscribe(ctx context.Context, vni uint32) error {
 	return err
 }
 
+func (ac *AgentClient) IsKeyReady(ctx context.Context, vni, timeout uint32) (bool, error) {
+	for range timeout {
+		isReadyRes, err := ac.client.IsKeyReady(ctx, &pb.AgentKeyReadyReq{Vni: vni})
+		if err != nil {
+			return false, err
+		}
+
+		if isReadyRes.is_ready {
+			return true, nil
+		}
+	}
+
+	return false, fmt.Errorf("Timeout while requesting key")
+}
+
 func (ac *AgentClient) Close() {
 	if ac.conn != nil {
 		ac.conn.Close()
