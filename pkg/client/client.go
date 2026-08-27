@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"fmt"
+	"time"
 
 	pb "github.com/cloudandheat/ironcore-dev-key-exchange/pkg/pb"
 
@@ -44,6 +45,23 @@ func (ac *AgentClient) Subscribe(ctx context.Context, vni uint32) error {
 func (ac *AgentClient) Unsubscribe(ctx context.Context, vni uint32) error {
 	_, err := ac.client.Unsubscribe(ctx, &pb.AgentUnsubscribeReq{Vni: vni})
 	return err
+}
+
+func (ac *AgentClient) IsKeyReady(ctx context.Context, vni, timeout uint32) (bool, error) {
+	for range timeout {
+		isReadyRes, err := ac.client.IsKeyReady(ctx, &pb.AgentKeyReadyReq{Vni: vni})
+		if err != nil {
+			return false, err
+		}
+
+		if isReadyRes.IsReady {
+			return true, nil
+		}
+
+		time.Sleep(1 * time.Second)
+	}
+
+	return false, fmt.Errorf("Timeout while requesting key")
 }
 
 func (ac *AgentClient) Close() {

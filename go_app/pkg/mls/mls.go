@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	pb "github.com/cloudandheat/ironcore-dev-key-exchange/proto"
@@ -50,18 +51,22 @@ type AgentImpl struct {
 	serverURL  string
 	clientIP   string
 	grpcClient pb.MlsServiceClient
-	vniToGroup map[uint32]string
+
+	mu            sync.RWMutex
+	vniToGroup    map[uint32]string
+	groupKeyReady map[string]bool
 }
 
 func NewAgent() *AgentImpl {
 	return &AgentImpl{
-		vniToGroup: make(map[uint32]string),
+		vniToGroup:    make(map[uint32]string),
+		groupKeyReady: make(map[string]bool),
 	}
 }
 
 // NEW: Server startup logic moved here from main.go
 func (a *AgentImpl) Start(port string) {
-	logrus.Infof("----------------- [%s] Start", a.name)
+	logrus.Infof("[%s] Start", a.name)
 
 	lis, err := net.Listen("tcp", port)
 	if err != nil {
@@ -117,8 +122,8 @@ func sendMsg(serverURL, to, msgType, from string, epoch uint64, groupID string, 
 	http.Post(url, "application/octet-stream", bytes.NewBuffer(data))
 }
 
-func (c *AgentImpl) handleSecretUpdate(action string, epoch uint64, secret []byte, ownIP string, vniIPs string) {
-	logrus.Infof("----------------- [%s] %s", c.name, action)
+func (c *AgentImpl) handleSecretUpdate(groupID string, action string, epoch uint64, secret []byte, ownIP string, vniIPs string) {
+	logrus.Infof("[%s] %s", c.name, action)
 
 	ownNetIP := net.ParseIP(ownIP)
 
@@ -170,42 +175,40 @@ func (c *AgentImpl) handleSecretUpdate(action string, epoch uint64, secret []byt
 		// Extract the first 4 bytes to use as the salt
 		salt := secureHash[:4]
 
-		logrus.Infof("------------------------------ Debug-output: %d : %x : %s : %s : %d : %x", SPI, salt, lower, higher, epoch, secret)
+		logrus.Infof("-------------Debug-output: %d : %x : %s : %s : %d : %x", SPI, salt, lower, higher, epoch, secret)
+		c.mu.Lock()
+		c.groupKeyReady[groupID] = true
+		c.mu.Unlock()
 	}
 }
 
 func (c *AgentImpl) Init(ctx context.Context, req *pb.AgentInitReq) (*pb.AgentEmpty, error) {
-	logrus.Infof("------------------------------ Init Agent")
+	logrus.Infof("-------------Init Agent")
 	c.name = req.ClientName
 	c.serverURL = req.BrokerUrl
 	c.clientIP = req.ClientIp
 
 	grpcURL := os.Getenv("RUST_GRPC_URL")
-	logrus.Infof("------------------------------ grpcURL %s", grpcURL)
-	logrus.Infof("------------------------------ poi1")
+	logrus.Infof("-------------grpcURL %s", grpcURL)
 
 	conn, err := grpc.NewClient(grpcURL, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to grpc: %v", err)
 	}
 	c.grpcClient = pb.NewMlsServiceClient(conn)
-	logrus.Infof("------------------------------ poi2")
 
 	_, err = c.grpcClient.GenerateCredential(context.Background(), &pb.GenerateReq{ClientId: c.name})
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate credential: %v", err)
 	}
-	logrus.Infof("------------------------------ poi3")
 
 	kpRes, err := c.grpcClient.GenerateKeyPackage(context.Background(), &pb.GenerateReq{ClientId: c.name})
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate key package: %v", err)
 	}
-	logrus.Infof("------------------------------ poi4")
 
 	pubKey := []byte(kpRes.KeyPackageHex)
 	url := fmt.Sprintf("%s/upload_kp?user=%s", c.serverURL, c.name)
-	logrus.Infof("------------------------------ poi5")
 
 	httpClient := &http.Client{Timeout: 3 * time.Second}
 	for {
@@ -221,14 +224,13 @@ func (c *AgentImpl) Init(ctx context.Context, req *pb.AgentInitReq) (*pb.AgentEm
 		}
 		time.Sleep(1 * time.Second)
 	}
-	logrus.Infof("------------------------------ poi6")
 
 	c.startListener()
 	return &pb.AgentEmpty{}, nil
 }
 
 func (c *AgentImpl) Subscribe(ctx context.Context, req *pb.AgentSubscribeReq) (*pb.AgentEmpty, error) {
-	logrus.Infof("------------------------------ Subscribe VNI: %d", req.Vni)
+	logrus.Infof("[%s] Subscribe VNI: %d", c.name, req.Vni)
 	url := fmt.Sprintf("%s/subscribe?user=%s&id=%d&ip=%s", c.serverURL, c.name, req.Vni, c.clientIP)
 	resp, err := http.Get(url)
 	if err != nil {
@@ -242,7 +244,7 @@ func (c *AgentImpl) Subscribe(ctx context.Context, req *pb.AgentSubscribeReq) (*
 	if bResp["status"] == "created" {
 		groupID := bResp["group_id"]
 		c.vniToGroup[req.Vni] = groupID
-		logrus.Infof("------------------------------ [%s] Subscribed. Creating group %s for VNI %d", c.name, groupID, req.Vni)
+		logrus.Infof("[%s] Subscribed. Creating group %s for VNI %d", c.name, groupID, req.Vni)
 
 		_, err := c.grpcClient.CreateGroup(context.Background(), &pb.CreateGroupReq{
 			ClientId: c.name, GroupId: groupID,
@@ -257,13 +259,13 @@ func (c *AgentImpl) Subscribe(ctx context.Context, req *pb.AgentSubscribeReq) (*
 	} else {
 		groupID := bResp["group_id"]
 		c.vniToGroup[req.Vni] = groupID // Save the mapping here too
-		logrus.Infof("------------------------------ [%s] Subscribed to VNI %d, waiting for invite to group %s", c.name, req.Vni, bResp["group_id"])
+		logrus.Infof("[%s] Subscribed to VNI %d, waiting for invite to group %s", c.name, req.Vni, bResp["group_id"])
 	}
 	return &pb.AgentEmpty{}, nil
 }
 
 func (c *AgentImpl) Unsubscribe(ctx context.Context, req *pb.AgentUnsubscribeReq) (*pb.AgentEmpty, error) {
-	logrus.Infof("------------------------------ Unsubscribe VNI: %d", req.Vni)
+	logrus.Infof("[%s] Unsubscribe VNI: %d", c.name, req.Vni)
 
 	// Tell the broker we are leaving (this triggers the initiator to remove us globally)
 	url := fmt.Sprintf("%s/unsubscribe?user=%s&id=%d", c.serverURL, c.name, req.Vni)
@@ -283,12 +285,15 @@ func (c *AgentImpl) Unsubscribe(ctx context.Context, req *pb.AgentUnsubscribeReq
 
 		// Clean up our local map
 		delete(c.vniToGroup, req.Vni)
+		delete(c.groupKeyReady, groupID)
 	}
 
 	return &pb.AgentEmpty{}, nil
 }
 
 func (c *AgentImpl) InviteMember(groupID string, peerName string, ips string) {
+	logrus.Infof("[%s] InviteMember group: %s and peer: %s", c.name, groupID, peerName)
+
 	resp, err := http.Get(fmt.Sprintf("%s/get_kp?user=%s", c.serverURL, peerName))
 	if err != nil {
 		logrus.Errorf("[%s] Failed to get key package for %s: %v", c.name, peerName, err)
@@ -303,13 +308,13 @@ func (c *AgentImpl) InviteMember(groupID string, peerName string, ips string) {
 		ClientId: c.name, GroupId: groupID, TargetKpHex: string(peerPubKey),
 	})
 	if err != nil {
-		logrus.Errorf("------------------------------ [%s] Failed to invite %s: %v", c.name, peerName, err)
+		logrus.Errorf("[%s] Failed to invite %s: %v", c.name, peerName, err)
 		return
 	}
 
 	treeRes, err := c.grpcClient.SerializeTree(context.Background(), &pb.SerializeTreeReq{GroupId: groupID})
 	if err != nil {
-		logrus.Errorf("------------------------------ [%s] Failed to serialize tree for group %s: %v", c.name, groupID, err)
+		logrus.Errorf("[%s] Failed to serialize tree for group %s: %v", c.name, groupID, err)
 		return
 	}
 
@@ -333,10 +338,27 @@ func (c *AgentImpl) InviteMember(groupID string, peerName string, ips string) {
 
 	secret, err := c.GetSharedSecret(groupID)
 	if err == nil {
-		c.handleSecretUpdate("Tree Updated", currentEpoch+1, secret, c.clientIP, ips)
+		c.handleSecretUpdate(groupID, "Tree Updated", currentEpoch+1, secret, c.clientIP, ips)
 	} else {
-		logrus.Errorf("------------------------------ [%s] Failed to extract shared secret after invite: %v", c.name, err)
+		logrus.Errorf("[%s] Failed to extract shared secret after invite: %v", c.name, err)
 	}
+}
+
+func (c *AgentImpl) IsKeyReady(ctx context.Context, req *pb.AgentKeyReadyReq) (*pb.AgentKeyReadyRes, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	groupID, exists := c.vniToGroup[req.Vni]
+
+	if !exists {
+		return &pb.AgentKeyReadyRes{IsReady: false}, nil
+	}
+
+	readyStatus := c.groupKeyReady[groupID]
+
+	return &pb.AgentKeyReadyRes{
+		IsReady: readyStatus,
+	}, nil
 }
 
 func (c *AgentImpl) processCommit(groupID string, env Envelope) {
@@ -356,7 +378,7 @@ func (c *AgentImpl) processCommit(groupID string, env Envelope) {
 		})
 
 		if err != nil {
-			logrus.Errorf("----------------- [%s] Failed to process commit in epoch %d: %v", c.name, env.Epoch, err)
+			logrus.Errorf("[%s] Failed to process commit in epoch %d: %v", c.name, env.Epoch, err)
 			return
 		}
 
@@ -367,7 +389,7 @@ func (c *AgentImpl) processCommit(groupID string, env Envelope) {
 			return
 		}
 
-		c.handleSecretUpdate("Tree Updated", expectedEpoch+1, secret, c.clientIP, env.IPs)
+		c.handleSecretUpdate(groupID, "Tree Updated", expectedEpoch+1, secret, c.clientIP, env.IPs)
 
 		if bufEnv, ok := commitBuffer[groupID][groupEpochs[groupID]]; ok {
 			delete(commitBuffer[groupID], groupEpochs[groupID])
@@ -391,21 +413,21 @@ func (c *AgentImpl) handleEvent(env Envelope) {
 	case "add_request":
 		var req map[string]string
 		json.Unmarshal(env.Data, &req)
-		logrus.Infof("----------------- [%s] Orchestrator mandated invite of %s to Group %s\n", c.name, req["user"], req["group_id"])
+		logrus.Infof("[%s] Orchestrator mandated invite of %s to Group %s\n", c.name, req["user"], req["group_id"])
 		c.InviteMember(req["group_id"], req["user"], env.IPs)
 
 	case "remove_request":
 		var req map[string]string
 		json.Unmarshal(env.Data, &req)
 		target := req["user"]
-		logrus.Infof("----------------- [%s] Orchestrator mandated removal of %s from Group %s\n", c.name, target, env.GroupID)
+		logrus.Infof("[%s] Orchestrator mandated removal of %s from Group %s\n", c.name, target, env.GroupID)
 
 		currentEpoch := groupEpochs[env.GroupID]
 		res, err := c.grpcClient.RemoveMember(context.Background(), &pb.RemoveReq{
 			ClientId: c.name, GroupId: env.GroupID, TargetClientId: target,
 		})
 		if err != nil {
-			logrus.Errorf("------------------------------ [%s] Failed to remove %s: %v", c.name, target, err)
+			logrus.Errorf("[%s] Failed to remove %s: %v", c.name, target, err)
 			return
 		}
 
@@ -431,7 +453,7 @@ func (c *AgentImpl) handleEvent(env Envelope) {
 		}
 
 		actionMsg := fmt.Sprintf("Tree Updated. REMOVED %s", target)
-		c.handleSecretUpdate(actionMsg, currentEpoch+1, secret, c.clientIP, env.IPs)
+		c.handleSecretUpdate(env.GroupID, actionMsg, currentEpoch+1, secret, c.clientIP, env.IPs)
 
 	case "invite_payload":
 		var inv InvitePayload
@@ -453,7 +475,7 @@ func (c *AgentImpl) handleEvent(env Envelope) {
 			ClientId: c.name, GroupId: env.GroupID, WelcomeBytes: wBytes, TreeBytes: tBytes,
 		})
 		if err != nil {
-			logrus.Errorf("----------------- [%s] Failed to process join: %v", c.name, err)
+			logrus.Errorf("[%s] Failed to process join: %v", c.name, err)
 			return
 		}
 
@@ -465,7 +487,7 @@ func (c *AgentImpl) handleEvent(env Envelope) {
 		}
 
 		actionMsg := fmt.Sprintf("Joined Group %s!", env.GroupID)
-		c.handleSecretUpdate(actionMsg, inv.Epoch, secret, c.clientIP, env.IPs)
+		c.handleSecretUpdate(env.GroupID, actionMsg, inv.Epoch, secret, c.clientIP, env.IPs)
 
 	case "commit":
 		c.processCommit(env.GroupID, env)
@@ -473,14 +495,14 @@ func (c *AgentImpl) handleEvent(env Envelope) {
 	case "update_request":
 		var req map[string]string
 		json.Unmarshal(env.Data, &req)
-		logrus.Infof("----------------- [%s] Orchestrator mandated Key Rotation (Self-Update) for Group %s\n", c.name, env.GroupID)
+		logrus.Infof("[%s] Orchestrator mandated Key Rotation (Self-Update) for Group %s\n", c.name, env.GroupID)
 
 		currentEpoch := groupEpochs[env.GroupID]
 		res, err := c.grpcClient.SelfUpdate(context.Background(), &pb.SelfUpdateReq{
 			ClientId: c.name, GroupId: env.GroupID,
 		})
 		if err != nil {
-			logrus.Errorf("------------------------------ [%s] Failed to self-update: %v", c.name, err)
+			logrus.Errorf("[%s] Failed to self-update: %v", c.name, err)
 			return
 		}
 
@@ -500,6 +522,6 @@ func (c *AgentImpl) handleEvent(env Envelope) {
 			return
 		}
 
-		logrus.Infof("----------------- [%s] Tree Updated (Epoch %d). KEY ROTATION SUCCESSFUL. GroupKey Preview: %x\n", c.name, currentEpoch+1, secret[:4])
+		c.handleSecretUpdate(env.GroupID, "Key-rotation", currentEpoch+1, secret, c.clientIP, env.IPs)
 	}
 }
