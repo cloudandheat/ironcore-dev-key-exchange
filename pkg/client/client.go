@@ -28,10 +28,9 @@ func NewAgentClient(targetURL string) (*AgentClient, error) {
 	}, nil
 }
 
-func (ac *AgentClient) Init(ctx context.Context, clientName, brokerURL, clientIP string) error {
+func (ac *AgentClient) Init(ctx context.Context, clientName, clientIP string) error {
 	_, err := ac.client.Init(ctx, &pb.AgentInitReq{
 		ClientName: clientName,
-		BrokerUrl:  brokerURL,
 		ClientIp:   clientIP,
 	})
 	return err

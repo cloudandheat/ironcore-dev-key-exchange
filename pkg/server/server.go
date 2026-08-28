@@ -286,7 +286,7 @@ func (s *ServerImpl) Start(port string) error {
 	mux.HandleFunc("/subscribe", s.handleSubscribe)
 	mux.HandleFunc("/unsubscribe", s.handleUnsubscribe)
 
-	go s.startKeyRotationLoop()
+	// go s.startKeyRotationLoop()
 
 	return http.ListenAndServe(port, mux)
 }
