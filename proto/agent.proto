@@ -7,8 +7,7 @@ message AgentEmpty {}
 
 message AgentInitReq {
     string client_name = 1;
-    string broker_url = 2;
-    string client_ip = 3;
+    string client_ip = 2;
 }
 
 message AgentSubscribeReq {

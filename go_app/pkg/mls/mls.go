@@ -213,6 +213,8 @@ func (c *AgentImpl) handleSecretUpdate(groupID string, action string, epoch uint
 func (c *AgentImpl) Init(ctx context.Context, req *pb.AgentInitReq) (*pb.AgentEmpty, error) {
 	logrus.Infof("-------------Init Agent")
 
+	serverAddress := os.Getenv("MLS_SERVER_ADDRESS")
+	logrus.Infof("-------------serverAddress %s", serverAddress)
 	grpcURL := os.Getenv("RUST_GRPC_URL")
 	logrus.Infof("-------------grpcURL %s", grpcURL)
 
@@ -224,7 +226,7 @@ func (c *AgentImpl) Init(ctx context.Context, req *pb.AgentInitReq) (*pb.AgentEm
 
 	c.mu.Lock()
 	c.name = req.ClientName
-	c.serverURL = req.BrokerUrl
+	c.serverURL = serverAddress
 	c.clientIP = req.ClientIp
 	c.grpcClient = grpcClient
 	c.mu.Unlock()
@@ -234,7 +236,7 @@ func (c *AgentImpl) Init(ctx context.Context, req *pb.AgentInitReq) (*pb.AgentEm
 		return nil, fmt.Errorf("failed to generate credential: %v", err)
 	}
 
-	// CHANGED: Pre-load the broker with a batch of 5 KeyPackages to buffer concurrent invites
+	// Pre-load the broker with a batch of 5 KeyPackages to buffer concurrent invites
 	for i := 0; i < 5; i++ {
 		c.generateAndUploadKP()
 	}
@@ -596,7 +598,7 @@ func (c *AgentImpl) handleEvent(env Envelope) {
 		actionMsg := fmt.Sprintf("Joined Group %s!", env.GroupID)
 		c.handleSecretUpdate(env.GroupID, actionMsg, inv.Epoch, secret, clientIP, env.IPs)
 
-		// CHANGED: We successfully consumed a KeyPackage to join this group.
+		// We successfully consumed a KeyPackage to join this group.
 		// Immediately generate and push a new one to the broker so we don't run out.
 		go c.generateAndUploadKP()
 
