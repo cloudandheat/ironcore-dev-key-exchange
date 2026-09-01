@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"strings"
 	"sync"
@@ -41,11 +42,11 @@ type InvitePayload struct {
 
 type AgentImpl struct {
 	pb.UnimplementedAgentServiceServer
-	mu         sync.RWMutex
-	name       string
-	serverURL  string
-	clientIP   string
-	grpcClient pb.MlsServiceClient
+	mu           sync.RWMutex
+	name         string
+	serverURL    string
+	clientPrefix string
+	grpcClient   pb.MlsServiceClient
 
 	vniToGroup    map[uint32]string
 	groupKeyReady map[string]bool
@@ -156,13 +157,22 @@ func sendMsg(serverURL, to, msgType, from string, epoch uint64, groupID string, 
 	http.Post(url, "application/octet-stream", bytes.NewBuffer(data))
 }
 
+func findFirstKey(m map[uint32]string, targetValue string) (uint32, bool) {
+	for k, v := range m {
+		if v == targetValue {
+			return k, true
+		}
+	}
+	return 0, false
+}
+
 func (c *AgentImpl) handleSecretUpdate(groupID string, action string, epoch uint64, secret []byte, ownIP string, vniIPs string) {
 	c.mu.RLock()
 	name := c.name
 	c.mu.RUnlock()
 
 	logrus.Infof("[%s] %s", name, action)
-	ownNetIP := net.ParseIP(ownIP)
+	ownPrefix, err1 := netip.ParsePrefix(ownIP)
 	ips := strings.Split(vniIPs, ",")
 
 	for _, peerIP := range ips {
@@ -171,11 +181,13 @@ func (c *AgentImpl) handleSecretUpdate(groupID string, action string, epoch uint
 			continue
 		}
 
-		peerNetIP := net.ParseIP(peerIP)
+		peerPrefix, err2 := netip.ParsePrefix(peerIP)
 		var lower, higher string
 
-		if ownNetIP != nil && peerNetIP != nil {
-			if bytes.Compare(ownNetIP.To16(), peerNetIP.To16()) < 0 {
+		// Assuming ownPrefix, err1 := netip.ParsePrefix(ownIP) was done earlier
+		if err1 == nil && err2 == nil {
+			// Compare() returns -1, 0, or 1
+			if ownPrefix.Addr().Compare(peerPrefix.Addr()) < 0 {
 				lower = ownIP
 				higher = peerIP
 			} else {
@@ -192,7 +204,11 @@ func (c *AgentImpl) handleSecretUpdate(groupID string, action string, epoch uint
 			}
 		}
 
-		contextString := fmt.Sprintf("%s:%s:%d", lower, higher, epoch)
+		c.mu.Lock()
+		vni, _ := findFirstKey(c.vniToGroup, groupID)
+		c.mu.Unlock()
+
+		contextString := fmt.Sprintf("%d:%s:%s:%d", vni, lower, higher, epoch)
 
 		h := fnv.New32a()
 		h.Write([]byte(contextString))
@@ -203,7 +219,13 @@ func (c *AgentImpl) handleSecretUpdate(groupID string, action string, epoch uint
 		secureHash := mac.Sum(nil)
 		salt := secureHash[:4]
 
-		logrus.Infof("-------------Debug-output: %d : %x : %s : %s : %d : %x", SPI, salt, lower, higher, epoch, secret)
+		logrus.Infof("-------------Debug-output")
+		logrus.Infof("------------- vni: %d", vni)
+		logrus.Infof("------------- SPI: %d", SPI)
+		logrus.Infof("------------- salt: %x", salt)
+		logrus.Infof("------------- target-prefix: %d", peerIP)
+		logrus.Infof("------------- secret: %x", secret)
+
 		c.mu.Lock()
 		logrus.Infof("------------- set group-id to ready: %s", groupID)
 		c.groupKeyReady[groupID] = true
@@ -228,7 +250,7 @@ func (c *AgentImpl) Init(ctx context.Context, req *pb.AgentInitReq) (*pb.AgentEm
 	c.mu.Lock()
 	c.name = req.ClientName
 	c.serverURL = serverAddress
-	c.clientIP = req.ClientIp
+	c.clientPrefix = req.ClientPrefix
 	c.grpcClient = grpcClient
 	c.mu.Unlock()
 
@@ -250,12 +272,12 @@ func (c *AgentImpl) Subscribe(ctx context.Context, req *pb.AgentSubscribeReq) (*
 	c.mu.RLock()
 	name := c.name
 	serverURL := c.serverURL
-	clientIP := c.clientIP
+	clientPrefix := c.clientPrefix
 	grpcClient := c.grpcClient
 	c.mu.RUnlock()
 
 	logrus.Infof("[%s] Subscribe VNI: %d", name, req.Vni)
-	url := fmt.Sprintf("%s/subscribe?user=%s&id=%d&ip=%s", serverURL, name, req.Vni, clientIP)
+	url := fmt.Sprintf("%s/subscribe?user=%s&id=%d&ip=%s", serverURL, name, req.Vni, clientPrefix)
 	resp, err := http.Get(url)
 	if err != nil {
 		return nil, fmt.Errorf("broker subscribe error: %v", err)
@@ -340,14 +362,13 @@ func (c *AgentImpl) InviteMember(groupID string, peerName string, ips string) {
 	name := c.name
 	serverURL := c.serverURL
 	grpcClient := c.grpcClient
-	clientIP := c.clientIP
+	clientPrefix := c.clientPrefix
 	currentEpoch := c.groupEpochs[groupID]
 	members := append([]string(nil), c.groupMembers[groupID]...)
 	c.mu.RUnlock()
 
 	logrus.Infof("[%s] InviteMember group: %s and peer: %s", name, groupID, peerName)
 
-	// CHANGED: Retry loop in case the peer's queue of KeyPackages is temporarily depleted
 	var peerPubKey []byte
 	for i := 0; i < 15; i++ {
 		resp, err := http.Get(fmt.Sprintf("%s/get_kp?user=%s", serverURL, peerName))
@@ -404,7 +425,7 @@ func (c *AgentImpl) InviteMember(groupID string, peerName string, ips string) {
 
 	secret, err := c.GetSharedSecret(groupID)
 	if err == nil {
-		c.handleSecretUpdate(groupID, "Tree Updated", currentEpoch+1, secret, clientIP, ips)
+		c.handleSecretUpdate(groupID, "Tree Updated", currentEpoch+1, secret, clientPrefix, ips)
 	} else {
 		logrus.Errorf("[%s] Failed to extract shared secret after invite: %v", name, err)
 	}
@@ -436,7 +457,7 @@ func (c *AgentImpl) processCommit(groupID string, env Envelope) {
 	expectedEpoch := c.groupEpochs[groupID]
 	name := c.name
 	grpcClient := c.grpcClient
-	clientIP := c.clientIP
+	clientPrefix := c.clientPrefix
 	c.mu.RUnlock()
 
 	if env.Epoch > expectedEpoch {
@@ -469,7 +490,7 @@ func (c *AgentImpl) processCommit(groupID string, env Envelope) {
 			return
 		}
 
-		c.handleSecretUpdate(groupID, "Tree Updated", expectedEpoch+1, secret, clientIP, env.IPs)
+		c.handleSecretUpdate(groupID, "Tree Updated", expectedEpoch+1, secret, clientPrefix, env.IPs)
 
 		c.mu.Lock()
 		bufEnv, ok := c.commitBuffer[groupID][expectedEpoch+1]
@@ -521,7 +542,7 @@ func (c *AgentImpl) handleEvent(env Envelope) {
 		name := c.name
 		serverURL := c.serverURL
 		grpcClient := c.grpcClient
-		clientIP := c.clientIP
+		clientPrefix := c.clientPrefix
 		currentEpoch := c.groupEpochs[env.GroupID]
 		members := append([]string(nil), c.groupMembers[env.GroupID]...)
 		c.mu.RUnlock()
@@ -560,7 +581,7 @@ func (c *AgentImpl) handleEvent(env Envelope) {
 		}
 
 		actionMsg := fmt.Sprintf("Tree Updated. REMOVED %s", target)
-		c.handleSecretUpdate(env.GroupID, actionMsg, currentEpoch+1, secret, clientIP, env.IPs)
+		c.handleSecretUpdate(env.GroupID, actionMsg, currentEpoch+1, secret, clientPrefix, env.IPs)
 
 	case "invite_payload":
 		var inv InvitePayload
@@ -581,7 +602,7 @@ func (c *AgentImpl) handleEvent(env Envelope) {
 		c.mu.RLock()
 		name := c.name
 		grpcClient := c.grpcClient
-		clientIP := c.clientIP
+		clientPrefix := c.clientPrefix
 		c.mu.RUnlock()
 
 		_, err = grpcClient.JoinGroup(context.Background(), &pb.JoinGroupReq{
@@ -603,7 +624,7 @@ func (c *AgentImpl) handleEvent(env Envelope) {
 		}
 
 		actionMsg := fmt.Sprintf("Joined Group %s!", env.GroupID)
-		c.handleSecretUpdate(env.GroupID, actionMsg, inv.Epoch, secret, clientIP, env.IPs)
+		c.handleSecretUpdate(env.GroupID, actionMsg, inv.Epoch, secret, clientPrefix, env.IPs)
 
 		// We successfully consumed a KeyPackage to join this group.
 		// Immediately generate and push a new one to the broker so we don't run out.
@@ -620,7 +641,7 @@ func (c *AgentImpl) handleEvent(env Envelope) {
 		name := c.name
 		serverURL := c.serverURL
 		grpcClient := c.grpcClient
-		clientIP := c.clientIP
+		clientPrefix := c.clientPrefix
 		currentEpoch := c.groupEpochs[env.GroupID]
 		members := append([]string(nil), c.groupMembers[env.GroupID]...)
 		c.mu.RUnlock()
@@ -651,6 +672,6 @@ func (c *AgentImpl) handleEvent(env Envelope) {
 			return
 		}
 
-		c.handleSecretUpdate(env.GroupID, "Key-rotation", currentEpoch+1, secret, clientIP, env.IPs)
+		c.handleSecretUpdate(env.GroupID, "Key-rotation", currentEpoch+1, secret, clientPrefix, env.IPs)
 	}
 }
