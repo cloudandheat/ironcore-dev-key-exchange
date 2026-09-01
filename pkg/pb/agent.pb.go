@@ -60,7 +60,7 @@ func (*AgentEmpty) Descriptor() ([]byte, []int) {
 type AgentInitReq struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	ClientName    string                 `protobuf:"bytes,1,opt,name=client_name,json=clientName,proto3" json:"client_name,omitempty"`
-	ClientIp      string                 `protobuf:"bytes,2,opt,name=client_ip,json=clientIp,proto3" json:"client_ip,omitempty"`
+	ClientPrefix  string                 `protobuf:"bytes,2,opt,name=client_prefix,json=clientPrefix,proto3" json:"client_prefix,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -102,9 +102,9 @@ func (x *AgentInitReq) GetClientName() string {
 	return ""
 }
 
-func (x *AgentInitReq) GetClientIp() string {
+func (x *AgentInitReq) GetClientPrefix() string {
 	if x != nil {
-		return x.ClientIp
+		return x.ClientPrefix
 	}
 	return ""
 }
@@ -291,11 +291,11 @@ const file_agent_proto_rawDesc = "" +
 	"\n" +
 	"\vagent.proto\x12\x05agent\"\f\n" +
 	"\n" +
-	"AgentEmpty\"L\n" +
+	"AgentEmpty\"T\n" +
 	"\fAgentInitReq\x12\x1f\n" +
 	"\vclient_name\x18\x01 \x01(\tR\n" +
-	"clientName\x12\x1b\n" +
-	"\tclient_ip\x18\x02 \x01(\tR\bclientIp\"%\n" +
+	"clientName\x12#\n" +
+	"\rclient_prefix\x18\x02 \x01(\tR\fclientPrefix\"%\n" +
 	"\x11AgentSubscribeReq\x12\x10\n" +
 	"\x03vni\x18\x01 \x01(\rR\x03vni\"'\n" +
 	"\x13AgentUnsubscribeReq\x12\x10\n" +
