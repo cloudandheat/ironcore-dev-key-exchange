@@ -6,6 +6,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
@@ -19,6 +20,10 @@ import (
 	"time"
 
 	pb "github.com/cloudandheat/ironcore-dev-key-exchange/proto"
+	dpdkproto "github.com/ironcore-dev/dpservice/go/dpservice-go/proto"
+
+	dpservice_api "github.com/ironcore-dev/dpservice/go/dpservice-go/api"
+	dpdkclient "github.com/ironcore-dev/dpservice/go/dpservice-go/client"
 
 	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
@@ -47,6 +52,7 @@ type AgentImpl struct {
 	serverURL    string
 	clientPrefix string
 	grpcClient   pb.MlsServiceClient
+	dpdkClient   dpdkclient.Client
 
 	vniToGroup    map[uint32]string
 	groupKeyReady map[string]bool
@@ -66,6 +72,23 @@ func NewAgent() *AgentImpl {
 	}
 }
 
+type DpServiceClient struct {
+	client dpdkproto.DPDKironcoreClient
+	conn   *grpc.ClientConn
+}
+
+func NewDpServiceClient(targetURL string) (*DpServiceClient, error) {
+	conn, err := grpc.NewClient(targetURL, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to dpservice at %s: %v", targetURL, err)
+	}
+
+	return &DpServiceClient{
+		client: dpdkproto.NewDPDKironcoreClient(conn),
+		conn:   conn,
+	}, nil
+}
+
 func (a *AgentImpl) Start(port string) {
 	a.mu.RLock()
 	name := a.name
@@ -80,6 +103,40 @@ func (a *AgentImpl) Start(port string) {
 
 	grpcServer := grpc.NewServer()
 	pb.RegisterAgentServiceServer(grpcServer, a)
+
+	dpserviceAddr := "127.0.0.1:1337"
+
+	logrus.Info("################################## init grpc to dpservice")
+
+	conn, err := grpc.NewClient(dpserviceAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		logrus.Fatalf("################################## unable create dpdk client: %s", err)
+	}
+	defer func() {
+		if err := conn.Close(); err != nil {
+			logrus.Fatalf("################################## unable to close dpdk connection: %s", err)
+		}
+	}()
+	logrus.Info("################################## init grpc to dpservice done")
+
+	dpdkProtoClient := dpdkproto.NewDPDKironcoreClient(conn)
+	a.dpdkClient = dpdkclient.NewClient(dpdkProtoClient)
+	logrus.Info("################################## init dpservice-client")
+
+	// hostName, _ := os.Hostname()
+	// protoVersion, err := a.dpdkClient.GetVersion(ctx, &dpdk.Version{
+	// 	TypeMeta: dpdk.TypeMeta{Kind: dpdk.VersionKind},
+	// 	VersionMeta: dpdk.VersionMeta{
+	// 		ClientName:    fmt.Sprintf("metalnet-%s", hostName),
+	// 		ClientVersion: "asdf",
+	// 	},
+	// })
+
+	// if err != nil {
+	// 	logrus.Fatalf("################################## unable to get proto version: %s", err)
+	// }
+
+	// logrus.Infof("################################## protoVersion: %s", protoVersion)
 
 	logrus.Infof("[AGENT] Starting Go Client Agent Daemon on %s", port)
 	if err := grpcServer.Serve(lis); err != nil {
@@ -166,6 +223,18 @@ func findFirstKey(m map[uint32]string, targetValue string) (uint32, bool) {
 	return 0, false
 }
 
+func trimIPv6(ip string) string {
+	if strings.HasSuffix(ip, ":1") {
+		// Slice off the last character (the '1')
+		return ip[:len(ip)-1]
+	}
+	return ip
+}
+
+func BytesToHex(data []byte) string {
+	return hex.EncodeToString(data)
+}
+
 func (c *AgentImpl) handleSecretUpdate(groupID string, action string, epoch uint64, secret []byte, ownIP string, vniIPs string) {
 	c.mu.RLock()
 	name := c.name
@@ -223,8 +292,92 @@ func (c *AgentImpl) handleSecretUpdate(groupID string, action string, epoch uint
 		logrus.Infof("------------- vni: %d", vni)
 		logrus.Infof("------------- SPI: %d", SPI)
 		logrus.Infof("------------- salt: %x", salt)
-		logrus.Infof("------------- target-prefix: %d", peerIP)
+		logrus.Infof("------------- target-prefix: %s", peerIP)
+		logrus.Infof("------------- own-prefix: %s", ownIP)
 		logrus.Infof("------------- secret: %x", secret)
+
+		peerIPAddr, err := netip.ParseAddr(trimIPv6(peerIP))
+		if err != nil {
+			logrus.Fatalf("################################## Failed to parse peer-IP %s with error: %s", peerIP, err)
+			return
+		}
+
+		ownIPAddr, err := netip.ParseAddr(trimIPv6(ownIP))
+		if err != nil {
+			logrus.Fatalf("################################## Failed to parse own-IP %s with error: %s", ownIP, err)
+			return
+		}
+
+		logrus.Infof("------------- create egress SA")
+
+		_, err = c.dpdkClient.CreateSecurityAssociation(context.Background(), &dpservice_api.SecurityAssociation{
+			TypeMeta: dpservice_api.TypeMeta{Kind: dpservice_api.SecurityAssociationKind},
+			SecurityAssociationMeta: dpservice_api.SecurityAssociationMeta{
+				Spi:         SPI,
+				SrcUnderlay: &ownIPAddr,
+				DstUnderlay: &peerIPAddr,
+			},
+			Spec: dpservice_api.SecurityAssociationSpec{
+				Direction:    "egress",
+				Algorithm:    "aes-128-gcm",
+				Key:          BytesToHex(secret[:16]), // IMPORTANT: it is reduced to match AES 128
+				Salt:         BytesToHex(salt),
+				ReplayWindow: 0,
+			},
+		})
+		if err != nil {
+			logrus.Fatalf("################################## unable to get create egress sa: %s", err)
+		}
+
+		logrus.Infof("------------- create ingress SA")
+
+		_, err = c.dpdkClient.CreateSecurityAssociation(context.Background(), &dpservice_api.SecurityAssociation{
+			TypeMeta: dpservice_api.TypeMeta{Kind: dpservice_api.SecurityAssociationKind},
+			SecurityAssociationMeta: dpservice_api.SecurityAssociationMeta{
+				Spi:         SPI,
+				SrcUnderlay: &peerIPAddr,
+				DstUnderlay: &ownIPAddr,
+			},
+			Spec: dpservice_api.SecurityAssociationSpec{
+				Direction:    "ingress",
+				Algorithm:    "aes-128-gcm",
+				Key:          BytesToHex(secret[:16]), // IMPORTANT: it is reduced to match AES 128
+				Salt:         BytesToHex(salt),
+				ReplayWindow: 1000,
+			},
+		})
+		if err != nil {
+			logrus.Fatalf("################################## unable to get create ingress sa: %s", err)
+		}
+
+		// _, err = c.dpdkClient.CreateSecurityAssociation(context.Background(), &dpservice_api.SecurityAssociation{
+		// 	SecurityAssociationMeta: dpservice_api.SecurityAssociationMeta{},
+		// 	Spec: dpservice_api.SecurityAssociationSpec{
+		// 		Spi:       SPI,
+		// 		Direction: "true",
+		// 		Vni:       vni,
+		// 		Ipv6:      addr,
+		// 		CryptAlgo: "AES-GCM",
+		// 		CryptKey:  secret,
+		// 		CryptSalt: salt,
+		// 	},
+		// })
+		// if err != nil {
+		// 	logrus.Fatalf("################################## unable to transfer secret: %s", err)
+		// }
+
+		// _, err = c.dpdkClient.AddSA(context.Background(), &dpdk.SecurityAssociation{
+		// 	Spi:       SPI,
+		// 	Direction: "true",
+		// 	Vni:       vni,
+		// 	Ipv6:      addr,
+		// 	CryptAlgo: "AES-GCM",
+		// 	CryptKey:  secret,
+		// 	CryptSalt: salt,
+		// })
+		// if err != nil {
+		// 	logrus.Fatalf("################################## unable to transfer secret: %s", err)
+		// }
 
 		c.mu.Lock()
 		logrus.Infof("------------- set group-id to ready: %s", groupID)
