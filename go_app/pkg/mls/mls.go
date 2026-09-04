@@ -313,7 +313,7 @@ func (c *AgentImpl) handleSecretUpdate(groupID string, action string, epoch uint
 		_, err = c.dpdkClient.CreateSecurityAssociation(context.Background(), &dpservice_api.SecurityAssociation{
 			TypeMeta: dpservice_api.TypeMeta{Kind: dpservice_api.SecurityAssociationKind},
 			SecurityAssociationMeta: dpservice_api.SecurityAssociationMeta{
-				Spi:         SPI,
+				Spi:         vni,
 				SrcUnderlay: &ownIPAddr,
 				DstUnderlay: &peerIPAddr,
 			},
@@ -334,7 +334,7 @@ func (c *AgentImpl) handleSecretUpdate(groupID string, action string, epoch uint
 		_, err = c.dpdkClient.CreateSecurityAssociation(context.Background(), &dpservice_api.SecurityAssociation{
 			TypeMeta: dpservice_api.TypeMeta{Kind: dpservice_api.SecurityAssociationKind},
 			SecurityAssociationMeta: dpservice_api.SecurityAssociationMeta{
-				Spi:         SPI,
+				Spi:         vni,
 				SrcUnderlay: &peerIPAddr,
 				DstUnderlay: &ownIPAddr,
 			},
