@@ -106,22 +106,22 @@ func (a *AgentImpl) Start(port string) {
 
 	dpserviceAddr := "127.0.0.1:1337"
 
-	logrus.Info("################################## init grpc to dpservice")
+	logrus.Info("init grpc to dpservice")
 
 	conn, err := grpc.NewClient(dpserviceAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
-		logrus.Fatalf("################################## unable create dpdk client: %s", err)
+		logrus.Fatalf("unable create dpdk client: %s", err)
 	}
 	defer func() {
 		if err := conn.Close(); err != nil {
-			logrus.Fatalf("################################## unable to close dpdk connection: %s", err)
+			logrus.Fatalf("unable to close dpdk connection: %s", err)
 		}
 	}()
-	logrus.Info("################################## init grpc to dpservice done")
+	logrus.Info("init grpc to dpservice done")
 
 	dpdkProtoClient := dpdkproto.NewDPDKironcoreClient(conn)
 	a.dpdkClient = dpdkclient.NewClient(dpdkProtoClient)
-	logrus.Info("################################## init dpservice-client")
+	logrus.Info("init dpservice-client")
 
 	// hostName, _ := os.Hostname()
 	// protoVersion, err := a.dpdkClient.GetVersion(ctx, &dpdk.Version{
@@ -133,10 +133,10 @@ func (a *AgentImpl) Start(port string) {
 	// })
 
 	// if err != nil {
-	// 	logrus.Fatalf("################################## unable to get proto version: %s", err)
+	// 	logrus.Fatalf("unable to get proto version: %s", err)
 	// }
 
-	// logrus.Infof("################################## protoVersion: %s", protoVersion)
+	// logrus.Infof("protoVersion: %s", protoVersion)
 
 	logrus.Infof("[AGENT] Starting Go Client Agent Daemon on %s", port)
 	if err := grpcServer.Serve(lis); err != nil {
@@ -214,6 +214,23 @@ func sendMsg(serverURL, to, msgType, from string, epoch uint64, groupID string, 
 	http.Post(url, "application/octet-stream", bytes.NewBuffer(data))
 }
 
+func (c *AgentImpl) sendAck(epoch uint64, groupID string) {
+	c.mu.RLock()
+	serverURL := c.serverURL
+	name := c.name
+	c.mu.RUnlock()
+
+	url := fmt.Sprintf("%s/ack?user=%s&group=%s&epoch=%d", serverURL, name, groupID, epoch)
+	go func() {
+		resp, err := http.Get(url)
+		if err != nil {
+			logrus.Errorf("[%s] Failed to send ACK for epoch %d: %v", name, epoch, err)
+		} else {
+			resp.Body.Close()
+		}
+	}()
+}
+
 func findFirstKey(m map[uint32]string, targetValue string) (uint32, bool) {
 	for k, v := range m {
 		if v == targetValue {
@@ -225,8 +242,10 @@ func findFirstKey(m map[uint32]string, targetValue string) (uint32, bool) {
 
 func trimIPv6(ip string) string {
 	if strings.HasSuffix(ip, ":1") {
-		// Slice off the last character (the '1')
 		return ip[:len(ip)-1]
+	}
+	if strings.HasSuffix(ip, "/64") {
+		return ip[:len(ip)-3]
 	}
 	return ip
 }
@@ -288,32 +307,35 @@ func (c *AgentImpl) handleSecretUpdate(groupID string, action string, epoch uint
 		secureHash := mac.Sum(nil)
 		salt := secureHash[:4]
 
+		// at the moment the SPI must be the same like the VNI
+		SPI = vni
+
 		logrus.Infof("-------------Debug-output")
-		logrus.Infof("------------- vni: %d", vni)
-		logrus.Infof("------------- SPI: %d", SPI)
-		logrus.Infof("------------- salt: %x", salt)
-		logrus.Infof("------------- target-prefix: %s", peerIP)
-		logrus.Infof("------------- own-prefix: %s", ownIP)
-		logrus.Infof("------------- secret: %x", secret)
+		logrus.Infof("vni: %d", vni)
+		logrus.Infof("SPI: %d", SPI)
+		logrus.Infof("salt: %x", salt)
+		logrus.Infof("target-prefix: %s", peerIP)
+		logrus.Infof("own-prefix: %s", ownIP)
+		// logrus.Infof("secret: %x", secret)
 
 		peerIPAddr, err := netip.ParseAddr(trimIPv6(peerIP))
 		if err != nil {
-			logrus.Fatalf("################################## Failed to parse peer-IP %s with error: %s", peerIP, err)
+			logrus.Errorf("Failed to parse peer-IP %s with error: %s", peerIP, err)
 			return
 		}
 
 		ownIPAddr, err := netip.ParseAddr(trimIPv6(ownIP))
 		if err != nil {
-			logrus.Fatalf("################################## Failed to parse own-IP %s with error: %s", ownIP, err)
+			logrus.Errorf("Failed to parse own-IP %s with error: %s", ownIP, err)
 			return
 		}
 
-		logrus.Infof("------------- create egress SA")
+		logrus.Infof("create egress SA")
 
 		_, err = c.dpdkClient.CreateSecurityAssociation(context.Background(), &dpservice_api.SecurityAssociation{
 			TypeMeta: dpservice_api.TypeMeta{Kind: dpservice_api.SecurityAssociationKind},
 			SecurityAssociationMeta: dpservice_api.SecurityAssociationMeta{
-				Spi:         vni,
+				Spi:         SPI,
 				SrcUnderlay: &ownIPAddr,
 				DstUnderlay: &peerIPAddr,
 			},
@@ -326,15 +348,16 @@ func (c *AgentImpl) handleSecretUpdate(groupID string, action string, epoch uint
 			},
 		})
 		if err != nil {
-			logrus.Fatalf("################################## unable to get create egress sa: %s", err)
+			logrus.Errorf("unable to get create egress sa: %s", err)
+			return
 		}
 
-		logrus.Infof("------------- create ingress SA")
+		logrus.Infof("create ingress SA")
 
 		_, err = c.dpdkClient.CreateSecurityAssociation(context.Background(), &dpservice_api.SecurityAssociation{
 			TypeMeta: dpservice_api.TypeMeta{Kind: dpservice_api.SecurityAssociationKind},
 			SecurityAssociationMeta: dpservice_api.SecurityAssociationMeta{
-				Spi:         vni,
+				Spi:         SPI,
 				SrcUnderlay: &peerIPAddr,
 				DstUnderlay: &ownIPAddr,
 			},
@@ -347,40 +370,12 @@ func (c *AgentImpl) handleSecretUpdate(groupID string, action string, epoch uint
 			},
 		})
 		if err != nil {
-			logrus.Fatalf("################################## unable to get create ingress sa: %s", err)
+			logrus.Errorf("unable to get create ingress sa: %s", err)
+			return
 		}
 
-		// _, err = c.dpdkClient.CreateSecurityAssociation(context.Background(), &dpservice_api.SecurityAssociation{
-		// 	SecurityAssociationMeta: dpservice_api.SecurityAssociationMeta{},
-		// 	Spec: dpservice_api.SecurityAssociationSpec{
-		// 		Spi:       SPI,
-		// 		Direction: "true",
-		// 		Vni:       vni,
-		// 		Ipv6:      addr,
-		// 		CryptAlgo: "AES-GCM",
-		// 		CryptKey:  secret,
-		// 		CryptSalt: salt,
-		// 	},
-		// })
-		// if err != nil {
-		// 	logrus.Fatalf("################################## unable to transfer secret: %s", err)
-		// }
-
-		// _, err = c.dpdkClient.AddSA(context.Background(), &dpdk.SecurityAssociation{
-		// 	Spi:       SPI,
-		// 	Direction: "true",
-		// 	Vni:       vni,
-		// 	Ipv6:      addr,
-		// 	CryptAlgo: "AES-GCM",
-		// 	CryptKey:  secret,
-		// 	CryptSalt: salt,
-		// })
-		// if err != nil {
-		// 	logrus.Fatalf("################################## unable to transfer secret: %s", err)
-		// }
-
 		c.mu.Lock()
-		logrus.Infof("------------- set group-id to ready: %s", groupID)
+		logrus.Infof("set group-id to ready: %s", groupID)
 		c.groupKeyReady[groupID] = true
 		c.mu.Unlock()
 	}
@@ -579,6 +574,7 @@ func (c *AgentImpl) InviteMember(groupID string, peerName string, ips string) {
 	secret, err := c.GetSharedSecret(groupID)
 	if err == nil {
 		c.handleSecretUpdate(groupID, "Tree Updated", currentEpoch+1, secret, clientPrefix, ips)
+		c.sendAck(currentEpoch+1, groupID)
 	} else {
 		logrus.Errorf("[%s] Failed to extract shared secret after invite: %v", name, err)
 	}
@@ -644,6 +640,7 @@ func (c *AgentImpl) processCommit(groupID string, env Envelope) {
 		}
 
 		c.handleSecretUpdate(groupID, "Tree Updated", expectedEpoch+1, secret, clientPrefix, env.IPs)
+		c.sendAck(expectedEpoch+1, groupID)
 
 		c.mu.Lock()
 		bufEnv, ok := c.commitBuffer[groupID][expectedEpoch+1]
@@ -675,6 +672,13 @@ func (c *AgentImpl) GetSharedSecret(groupID string) ([]byte, error) {
 
 func (c *AgentImpl) handleEvent(env Envelope) {
 	switch env.Type {
+	case "epoch_ready":
+		c.mu.Lock()
+		logrus.Infof("################################## [%s] Received epoch_ready for Group %s, Epoch %d. All peers have provisioned the datapath.", c.name, env.GroupID, env.Epoch)
+
+		// TODO: delete old key
+
+		c.mu.Unlock()
 	case "add_request":
 		var req map[string]string
 		json.Unmarshal(env.Data, &req)
@@ -735,6 +739,7 @@ func (c *AgentImpl) handleEvent(env Envelope) {
 
 		actionMsg := fmt.Sprintf("Tree Updated. REMOVED %s", target)
 		c.handleSecretUpdate(env.GroupID, actionMsg, currentEpoch+1, secret, clientPrefix, env.IPs)
+		c.sendAck(currentEpoch+1, env.GroupID)
 
 	case "invite_payload":
 		var inv InvitePayload
@@ -778,6 +783,7 @@ func (c *AgentImpl) handleEvent(env Envelope) {
 
 		actionMsg := fmt.Sprintf("Joined Group %s!", env.GroupID)
 		c.handleSecretUpdate(env.GroupID, actionMsg, inv.Epoch, secret, clientPrefix, env.IPs)
+		c.sendAck(inv.Epoch, env.GroupID)
 
 		// We successfully consumed a KeyPackage to join this group.
 		// Immediately generate and push a new one to the broker so we don't run out.
@@ -826,5 +832,6 @@ func (c *AgentImpl) handleEvent(env Envelope) {
 		}
 
 		c.handleSecretUpdate(env.GroupID, "Key-rotation", currentEpoch+1, secret, clientPrefix, env.IPs)
+		c.sendAck(currentEpoch+1, env.GroupID)
 	}
 }

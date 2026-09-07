@@ -50,6 +50,7 @@ type ServerImpl struct {
 	subscriptions map[uint32][]Subscriber
 	groups        map[uint32]*GroupInfo
 	groupIDToVNI  map[string]uint32
+	epochAcks     map[string]map[uint64]map[string]bool
 }
 
 func NewServer() *ServerImpl {
@@ -59,6 +60,7 @@ func NewServer() *ServerImpl {
 		subscriptions: make(map[uint32][]Subscriber),
 		groups:        make(map[uint32]*GroupInfo),
 		groupIDToVNI:  make(map[string]uint32),
+		epochAcks:     make(map[string]map[uint64]map[string]bool),
 	}
 }
 
@@ -275,6 +277,69 @@ func (s *ServerImpl) startKeyRotationLoop() {
 	}
 }
 
+// to ack epoch in case of key-rotation
+func (s *ServerImpl) ackHandler(w http.ResponseWriter, r *http.Request) {
+	user := r.URL.Query().Get("user")
+	groupID := r.URL.Query().Get("group")
+	epoch, _ := strconv.ParseUint(r.URL.Query().Get("epoch"), 10, 64)
+
+	s.mu.Lock()
+
+	if s.epochAcks[groupID] == nil {
+		s.epochAcks[groupID] = make(map[uint64]map[string]bool)
+	}
+	if s.epochAcks[groupID][epoch] == nil {
+		s.epochAcks[groupID][epoch] = make(map[string]bool)
+	}
+
+	s.epochAcks[groupID][epoch][user] = true
+
+	vni, ok := s.groupIDToVNI[groupID]
+	if !ok {
+		s.mu.Unlock()
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	subs := s.subscriptions[vni]
+	allAcked := true
+
+	for _, sub := range subs {
+		if !s.epochAcks[groupID][epoch][sub.User] {
+			allAcked = false
+			break
+		}
+	}
+
+	// Gather the mailboxes while locked
+	var mailboxes []chan Envelope
+	if allAcked && len(subs) > 0 {
+		for _, sub := range subs {
+			mailboxes = append(mailboxes, s.getMailbox(sub.User))
+		}
+		// Clean up the memory for this epoch since everyone is synced
+		delete(s.epochAcks[groupID], epoch)
+	}
+
+	// Unlock BEFORE sending to channels
+	s.mu.Unlock()
+
+	// Send the messages safely outside the lock
+	if allAcked && len(mailboxes) > 0 {
+		logrus.Infof("[MLS-Broker] Group %s Epoch %d fully ACKed. Broadcasting epoch_ready.", groupID, epoch)
+		for _, ch := range mailboxes {
+			ch <- Envelope{
+				Type:    "epoch_ready",
+				From:    "broker",
+				GroupID: groupID,
+				Epoch:   epoch,
+			}
+		}
+	}
+
+	w.WriteHeader(http.StatusOK)
+}
+
 func (s *ServerImpl) Start(port string) error {
 	logrus.Infof("[MLS-Broker] start MLS server")
 
@@ -285,6 +350,7 @@ func (s *ServerImpl) Start(port string) error {
 	mux.HandleFunc("/get_kp", s.getKP)
 	mux.HandleFunc("/subscribe", s.handleSubscribe)
 	mux.HandleFunc("/unsubscribe", s.handleUnsubscribe)
+	mux.HandleFunc("/ack", s.ackHandler)
 
 	// go s.startKeyRotationLoop()
 
