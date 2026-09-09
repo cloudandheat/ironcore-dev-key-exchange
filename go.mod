@@ -10,9 +10,8 @@ require (
 )
 
 require (
-	github.com/sirupsen/logrus v1.9.4
 	google.golang.org/grpc v1.82.1
 	google.golang.org/protobuf v1.36.11
 )
 
-replace github.com/ironcore-dev/dpservice/go/dpservice-go => github.com/opensovereigncloud/dpservice-ipsec-poc/go/dpservice-go v0.0.0-20260902010700-0e83ca85b5a8
+replace github.com/ironcore-dev/dpservice/go/dpservice-go => github.com/opensovereigncloud/dpservice-ipsec-poc/go/dpservice-go v0.0.0-20260908194544-5a5c62cb58e2

@@ -22,7 +22,7 @@ import (
 	pb "github.com/cloudandheat/ironcore-dev-key-exchange/proto"
 	dpdkproto "github.com/ironcore-dev/dpservice/go/dpservice-go/proto"
 
-	dpservice_api "github.com/ironcore-dev/dpservice/go/dpservice-go/api"
+	// dpservice_api "github.com/ironcore-dev/dpservice/go/dpservice-go/api"
 	dpdkclient "github.com/ironcore-dev/dpservice/go/dpservice-go/client"
 
 	"github.com/sirupsen/logrus"
@@ -316,64 +316,88 @@ func (c *AgentImpl) handleSecretUpdate(groupID string, action string, epoch uint
 		logrus.Infof("salt: %x", salt)
 		logrus.Infof("target-prefix: %s", peerIP)
 		logrus.Infof("own-prefix: %s", ownIP)
-		// logrus.Infof("secret: %x", secret)
+		//logrus.Infof("secret: %x", secret)
 
-		peerIPAddr, err := netip.ParseAddr(trimIPv6(peerIP))
-		if err != nil {
-			logrus.Errorf("Failed to parse peer-IP %s with error: %s", peerIP, err)
-			return
-		}
+		// //======================================================================================================
+		// // Workaround for the moment to enable encryption for all interfaces of the VNI
+		// // TODO: handle by metalnet network-interface controller
+		// interfaceList, err := c.dpdkClient.ListInterfaces(context.Background())
+		// if err != nil {
+		// 	fmt.Errorf("error listing interfaces: %w", err)
+		// 	return
+		// }
+		// for _, iface := range interfaceList.Items {
+		// 	if iface.Spec.VNI == vni {
+		// 		_, err := c.dpdkClient.EnableInterfaceEncryption(context.Background(), iface.ID)
+		// 		if err != nil {
+		// 			fmt.Errorf("error enabling interface encryption: %w", err)
+		// 			return
+		// 		}
+		// 	}
+		// }
+		// //======================================================================================================
 
-		ownIPAddr, err := netip.ParseAddr(trimIPv6(ownIP))
-		if err != nil {
-			logrus.Errorf("Failed to parse own-IP %s with error: %s", ownIP, err)
-			return
-		}
+		// peerIPAddr, err := netip.ParseAddr(trimIPv6(peerIP))
+		// if err != nil {
+		// 	logrus.Errorf("Failed to parse peer-IP %s with error: %s", peerIP, err)
+		// 	return
+		// }
+
+		// ownIPAddr, err := netip.ParseAddr(trimIPv6(ownIP))
+		// if err != nil {
+		// 	logrus.Errorf("Failed to parse own-IP %s with error: %s", ownIP, err)
+		// 	return
+		// }
 
 		logrus.Infof("create egress SA")
 
-		_, err = c.dpdkClient.CreateSecurityAssociation(context.Background(), &dpservice_api.SecurityAssociation{
-			TypeMeta: dpservice_api.TypeMeta{Kind: dpservice_api.SecurityAssociationKind},
-			SecurityAssociationMeta: dpservice_api.SecurityAssociationMeta{
-				Spi:         SPI,
-				SrcUnderlay: &ownIPAddr,
-				DstUnderlay: &peerIPAddr,
-			},
-			Spec: dpservice_api.SecurityAssociationSpec{
-				Direction:    "egress",
-				Algorithm:    "aes-128-gcm",
-				Key:          BytesToHex(secret[:16]), // IMPORTANT: it is reduced to match AES 128
-				Salt:         BytesToHex(salt),
-				ReplayWindow: 0,
-			},
-		})
-		if err != nil {
-			logrus.Errorf("unable to get create egress sa: %s", err)
-			return
-		}
+		// _, err = c.dpdkClient.CreateSecurityAssociation(context.Background(), &dpservice_api.SecurityAssociation{
+		// 	TypeMeta: dpservice_api.TypeMeta{Kind: dpservice_api.SecurityAssociationKind},
+		// 	SecurityAssociationMeta: dpservice_api.SecurityAssociationMeta{
+		// 		Spi:         SPI,
+		// 		Vni:         vni,
+		// 		Direction:   "egress",
+		// 		SrcUnderlay: &ownIPAddr,
+		// 		DstUnderlay: &peerIPAddr,
+		// 	},
+		// 	Spec: dpservice_api.SecurityAssociationSpec{
+		// 		Algorithm:    "aes-256-gcm",
+		// 		Key:          BytesToHex(secret),
+		// 		Salt:         BytesToHex(salt),
+		// 		ReplayWindow: 0,
+		// 		Esn:          true,
+		// 	},
+		// })
+		// if err != nil {
+		// 	logrus.Errorf("unable to get create egress sa: %s", err)
+		// 	return
+		// }
 
 		logrus.Infof("create ingress SA")
 
-		_, err = c.dpdkClient.CreateSecurityAssociation(context.Background(), &dpservice_api.SecurityAssociation{
-			TypeMeta: dpservice_api.TypeMeta{Kind: dpservice_api.SecurityAssociationKind},
-			SecurityAssociationMeta: dpservice_api.SecurityAssociationMeta{
-				Spi:         SPI,
-				SrcUnderlay: &peerIPAddr,
-				DstUnderlay: &ownIPAddr,
-			},
-			Spec: dpservice_api.SecurityAssociationSpec{
-				Direction:    "ingress",
-				Algorithm:    "aes-128-gcm",
-				Key:          BytesToHex(secret[:16]), // IMPORTANT: it is reduced to match AES 128
-				Salt:         BytesToHex(salt),
-				ReplayWindow: 1000,
-			},
-		})
-		if err != nil {
-			logrus.Errorf("unable to get create ingress sa: %s", err)
-			return
-		}
+		// _, err = c.dpdkClient.CreateSecurityAssociation(context.Background(), &dpservice_api.SecurityAssociation{
+		// 	TypeMeta: dpservice_api.TypeMeta{Kind: dpservice_api.SecurityAssociationKind},
+		// 	SecurityAssociationMeta: dpservice_api.SecurityAssociationMeta{
+		// 		Spi:         SPI,
+		// 		Vni:         vni,
+		// 		Direction:   "ingress",
+		// 		SrcUnderlay: &peerIPAddr,
+		// 		DstUnderlay: &ownIPAddr,
+		// 	},
+		// 	Spec: dpservice_api.SecurityAssociationSpec{
+		// 		Algorithm:    "aes-256-gcm",
+		// 		Key:          BytesToHex(secret),
+		// 		Salt:         BytesToHex(salt),
+		// 		ReplayWindow: 1000,
+		// 		Esn:          true,
+		// 	},
+		// })
+		// if err != nil {
+		// 	logrus.Errorf("unable to get create ingress sa: %s", err)
+		// 	return
+		// }
 
+		// mark key as ready
 		c.mu.Lock()
 		logrus.Infof("set group-id to ready: %s", groupID)
 		c.groupKeyReady[groupID] = true
@@ -382,12 +406,10 @@ func (c *AgentImpl) handleSecretUpdate(groupID string, action string, epoch uint
 }
 
 func (c *AgentImpl) Init(ctx context.Context, req *pb.AgentInitReq) (*pb.AgentEmpty, error) {
-	logrus.Infof("-------------Init Agent")
+	logrus.Infof("Init Agent")
 
 	serverAddress := os.Getenv("MLS_SERVER_ADDRESS")
-	logrus.Infof("-------------serverAddress %s", serverAddress)
 	grpcURL := os.Getenv("RUST_GRPC_URL")
-	logrus.Infof("-------------grpcURL %s", grpcURL)
 
 	conn, err := grpc.NewClient(grpcURL, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
@@ -674,7 +696,7 @@ func (c *AgentImpl) handleEvent(env Envelope) {
 	switch env.Type {
 	case "epoch_ready":
 		c.mu.Lock()
-		logrus.Infof("################################## [%s] Received epoch_ready for Group %s, Epoch %d. All peers have provisioned the datapath.", c.name, env.GroupID, env.Epoch)
+		logrus.Infof("[%s] Received epoch_ready for Group %s, Epoch %d. All peers have provisioned the datapath.", c.name, env.GroupID, env.Epoch)
 
 		// TODO: delete old key
 
