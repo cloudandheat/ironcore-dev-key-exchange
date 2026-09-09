@@ -313,16 +313,18 @@ func (c *AgentImpl) handleSecretUpdate(groupID string, action string, epoch uint
 		_, err = c.dpdkClient.CreateSecurityAssociation(context.Background(), &dpservice_api.SecurityAssociation{
 			TypeMeta: dpservice_api.TypeMeta{Kind: dpservice_api.SecurityAssociationKind},
 			SecurityAssociationMeta: dpservice_api.SecurityAssociationMeta{
-				Spi:         vni,
+				Spi:         SPI,
+				Vni:         vni,
+				Direction:   "egress",
 				SrcUnderlay: &ownIPAddr,
 				DstUnderlay: &peerIPAddr,
 			},
 			Spec: dpservice_api.SecurityAssociationSpec{
-				Direction:    "egress",
-				Algorithm:    "aes-128-gcm",
-				Key:          BytesToHex(secret[:16]), // IMPORTANT: it is reduced to match AES 128
+				Algorithm:    "aes-256-gcm",
+				Key:          BytesToHex(secret),
 				Salt:         BytesToHex(salt),
 				ReplayWindow: 0,
+				Esn:          true,
 			},
 		})
 		if err != nil {
@@ -334,16 +336,18 @@ func (c *AgentImpl) handleSecretUpdate(groupID string, action string, epoch uint
 		_, err = c.dpdkClient.CreateSecurityAssociation(context.Background(), &dpservice_api.SecurityAssociation{
 			TypeMeta: dpservice_api.TypeMeta{Kind: dpservice_api.SecurityAssociationKind},
 			SecurityAssociationMeta: dpservice_api.SecurityAssociationMeta{
-				Spi:         vni,
+				Spi:         SPI,
+				Vni:         vni,
+				Direction:   "ingress",
 				SrcUnderlay: &peerIPAddr,
 				DstUnderlay: &ownIPAddr,
 			},
 			Spec: dpservice_api.SecurityAssociationSpec{
-				Direction:    "ingress",
-				Algorithm:    "aes-128-gcm",
-				Key:          BytesToHex(secret[:16]), // IMPORTANT: it is reduced to match AES 128
+				Algorithm:    "aes-256-gcm",
+				Key:          BytesToHex(secret),
 				Salt:         BytesToHex(salt),
 				ReplayWindow: 1000,
+				Esn:          true,
 			},
 		})
 		if err != nil {
