@@ -296,15 +296,31 @@ func (c *AgentImpl) handleSecretUpdate(groupID string, action string, epoch uint
 		logrus.Infof("------------- own-prefix: %s", ownIP)
 		logrus.Infof("------------- secret: %x", secret)
 
+		interfaceList, err := c.dpdkClient.ListInterfaces(context.Background())
+		if err != nil {
+			fmt.Errorf("error listing interfaces: %w", err)
+			return
+		}
+
+		for _, iface := range interfaceList.Items {
+			if iface.Spec.VNI == vni {
+				_, err := c.dpdkClient.EnableInterfaceEncryption(context.Background(), iface.ID)
+				if err != nil {
+					fmt.Errorf("error enabling interface encryption: %w", err)
+					return
+				}
+			}
+		}
+
 		peerIPAddr, err := netip.ParseAddr(trimIPv6(peerIP))
 		if err != nil {
-			logrus.Fatalf("################################## Failed to parse peer-IP %s with error: %s", peerIP, err)
+			logrus.Errorf("################################## Failed to parse peer-IP %s with error: %s", peerIP, err)
 			return
 		}
 
 		ownIPAddr, err := netip.ParseAddr(trimIPv6(ownIP))
 		if err != nil {
-			logrus.Fatalf("################################## Failed to parse own-IP %s with error: %s", ownIP, err)
+			logrus.Errorf("################################## Failed to parse own-IP %s with error: %s", ownIP, err)
 			return
 		}
 
@@ -313,20 +329,23 @@ func (c *AgentImpl) handleSecretUpdate(groupID string, action string, epoch uint
 		_, err = c.dpdkClient.CreateSecurityAssociation(context.Background(), &dpservice_api.SecurityAssociation{
 			TypeMeta: dpservice_api.TypeMeta{Kind: dpservice_api.SecurityAssociationKind},
 			SecurityAssociationMeta: dpservice_api.SecurityAssociationMeta{
-				Spi:         vni,
+				Spi:         SPI,
+				Vni:         vni,
+				Direction:   "egress",
 				SrcUnderlay: &ownIPAddr,
 				DstUnderlay: &peerIPAddr,
 			},
 			Spec: dpservice_api.SecurityAssociationSpec{
-				Direction:    "egress",
-				Algorithm:    "aes-128-gcm",
-				Key:          BytesToHex(secret[:16]), // IMPORTANT: it is reduced to match AES 128
+				Algorithm:    "aes-256-gcm",
+				Key:          BytesToHex(secret),
 				Salt:         BytesToHex(salt),
 				ReplayWindow: 0,
+				Esn:          true,
 			},
 		})
 		if err != nil {
-			logrus.Fatalf("################################## unable to get create egress sa: %s", err)
+			logrus.Errorf("################################## unable to get create egress sa: %s", err)
+			return
 		}
 
 		logrus.Infof("------------- create ingress SA")
@@ -334,20 +353,23 @@ func (c *AgentImpl) handleSecretUpdate(groupID string, action string, epoch uint
 		_, err = c.dpdkClient.CreateSecurityAssociation(context.Background(), &dpservice_api.SecurityAssociation{
 			TypeMeta: dpservice_api.TypeMeta{Kind: dpservice_api.SecurityAssociationKind},
 			SecurityAssociationMeta: dpservice_api.SecurityAssociationMeta{
-				Spi:         vni,
+				Spi:         SPI,
+				Vni:         vni,
+				Direction:   "ingress",
 				SrcUnderlay: &peerIPAddr,
 				DstUnderlay: &ownIPAddr,
 			},
 			Spec: dpservice_api.SecurityAssociationSpec{
-				Direction:    "ingress",
-				Algorithm:    "aes-128-gcm",
-				Key:          BytesToHex(secret[:16]), // IMPORTANT: it is reduced to match AES 128
+				Algorithm:    "aes-256-gcm",
+				Key:          BytesToHex(secret),
 				Salt:         BytesToHex(salt),
 				ReplayWindow: 1000,
+				Esn:          true,
 			},
 		})
 		if err != nil {
-			logrus.Fatalf("################################## unable to get create ingress sa: %s", err)
+			logrus.Errorf("################################## unable to get create ingress sa: %s", err)
+			return
 		}
 
 		// _, err = c.dpdkClient.CreateSecurityAssociation(context.Background(), &dpservice_api.SecurityAssociation{
