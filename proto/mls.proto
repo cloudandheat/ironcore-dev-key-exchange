@@ -79,9 +79,29 @@ message SelfUpdateRes {
     bytes commit_bytes = 1; 
 }
 
-message DropGroupReq { 
-    string client_id = 1; 
-    string group_id = 2; 
+message DropGroupReq {
+    string client_id = 1;
+    string group_id = 2;
+}
+
+message GroupInfoReq {
+    string client_id = 1;
+    string group_id = 2;
+}
+
+message GroupInfoRes {
+    bool exists = 1;
+    uint64 epoch = 2;
+    repeated string members = 3;
+}
+
+// Re-add a member which lost its state: its old leaf (if still in the group) is replaced by a
+// fresh one from the given key package within one single commit.
+message SwapMemberReq {
+    string client_id = 1;
+    string group_id = 2;
+    string target_client_id = 3;
+    string target_kp_hex = 4;
 }
 
 service MlsService {
@@ -96,4 +116,6 @@ service MlsService {
     rpc RemoveMember(RemoveReq) returns (RemoveRes);
     rpc SelfUpdate(SelfUpdateReq) returns (SelfUpdateRes);
     rpc DropGroup(DropGroupReq) returns (Empty);
+    rpc GetGroupInfo(GroupInfoReq) returns (GroupInfoRes);
+    rpc SwapMember(SwapMemberReq) returns (InviteRes);
 }

@@ -1,341 +1,167 @@
-// server.go
+// The MLS server: delivery service and coordinator for the agents. This file holds the server
+// itself, its HTTP wiring and the periodic housekeeping.
 package server
 
 import (
-	"encoding/json"
-	"io"
+	"crypto/rand"
+	"encoding/hex"
 	"net/http"
+	"os"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/sirupsen/logrus"
 )
 
-type Envelope struct {
-	Type  string `json:"Type"`
-	From  string `json:"From"`
-	Epoch uint64 `json:"Epoch"`
-	VNI   uint32 `json:"VNI"`
-	Data  []byte `json:"Data"`
-	IPs   string `json:"IPs,omitempty"`
-}
+// The server holds no persistent state. Everything it knows is rebuilt from the agents, when
+// they register and subscribe again after it restarted. To make them notice a restart, every
+// response carries the boot-ID of this server instance.
+const BootIDHeader = "X-Mls-Server-Boot-Id"
 
-type Subscriber struct {
-	User string
-	IP   string
-}
-
-type GroupInfo struct {
-	Initiator string
-	VNI       uint32
-}
-
-type ActionRequest struct {
-	User string `json:"user"`
-	VNI  uint32 `json:"vni"`
-}
-
-type BrokerResp struct {
-	Status string `json:"status"`
-	VNI    uint32 `json:"vni"`
-}
+const (
+	// a membership operation or a rekey round, which did not complete within this time, is
+	// considered stalled (e.g. because a member is down) and does not block further progress
+	stallTimeout = 20 * time.Second
+	// an agent, which did not poll within this time, is considered dead
+	livenessTimeout = 45 * time.Second
+	maxOpRetries    = 3
+	// interval of the regular key rotation, can be overridden by MLS_KEY_ROTATION_INTERVAL
+	defaultKeyRotationInterval = 60 * time.Minute
+)
 
 type ServerImpl struct {
-	mu            sync.RWMutex
-	mailboxes     map[string]chan Envelope
-	keyPackages   map[string][][]byte
-	subscriptions map[uint32][]Subscriber
-	groups        map[uint32]*GroupInfo
-	epochAcks     map[uint32]map[uint64]map[string]bool
+	mu          sync.Mutex
+	bootID      string
+	nextOpID    uint64
+	mailboxes   map[string]chan Envelope
+	keyPackages map[string][][]byte
+	lastSeen    map[string]time.Time
+	groups      map[uint32]*group
 }
 
+// NewServer creates a server with empty state and a random boot-ID, by which the agents detect a
+// restart.
 func NewServer() *ServerImpl {
+	id := make([]byte, 8)
+	rand.Read(id)
+
 	return &ServerImpl{
-		mailboxes:     make(map[string]chan Envelope),
-		keyPackages:   make(map[string][][]byte),
-		subscriptions: make(map[uint32][]Subscriber),
-		groups:        make(map[uint32]*GroupInfo),
-		epochAcks:     make(map[uint32]map[uint64]map[string]bool),
+		bootID:      hex.EncodeToString(id),
+		mailboxes:   make(map[string]chan Envelope),
+		keyPackages: make(map[string][][]byte),
+		lastSeen:    make(map[string]time.Time),
+		groups:      make(map[uint32]*group),
 	}
 }
 
-func (s *ServerImpl) getMailbox(user string) chan Envelope {
-	if s.mailboxes[user] == nil {
-		s.mailboxes[user] = make(chan Envelope, 1000)
-	}
-	return s.mailboxes[user]
+// isAlive reports, whether the agent polled recently. Used to prefer live members, when a new
+// committer has to be chosen. Must be called with s.mu held.
+func (s *ServerImpl) isAlive(user string) bool {
+	return time.Since(s.lastSeen[user]) < livenessTimeout
 }
 
-func (s *ServerImpl) sendHandler(w http.ResponseWriter, r *http.Request) {
-	to := r.URL.Query().Get("to")
-	data, _ := io.ReadAll(r.Body)
-	epoch, _ := strconv.ParseUint(r.URL.Query().Get("epoch"), 10, 64)
-	vniInt, _ := strconv.ParseUint(r.URL.Query().Get("vni"), 10, 32)
-	vni := uint32(vniInt)
-
-	env := Envelope{
-		Type:  r.URL.Query().Get("type"),
-		From:  r.URL.Query().Get("from"),
-		Epoch: epoch,
-		VNI:   vni,
-		Data:  data,
-	}
-
-	s.mu.Lock()
-	ch := s.getMailbox(to)
-	s.mu.Unlock()
-
-	ch <- env
-	w.WriteHeader(http.StatusOK)
+// queryVNI reads a VNI from a query parameter of a request.
+func queryVNI(r *http.Request, key string) uint32 {
+	v, _ := strconv.ParseUint(r.URL.Query().Get(key), 10, 32)
+	return uint32(v)
 }
 
-func (s *ServerImpl) pollHandler(w http.ResponseWriter, r *http.Request) {
-	user := r.URL.Query().Get("user")
+// queryUint64 reads an unsigned number, e.g. an epoch, from a query parameter of a request.
+func queryUint64(r *http.Request, key string) uint64 {
+	v, _ := strconv.ParseUint(r.URL.Query().Get(key), 10, 64)
+	return v
+}
 
-	s.mu.Lock()
-	ch := s.getMailbox(user)
-	s.mu.Unlock()
-
-	select {
-	case <-r.Context().Done():
-		return
-	case msg := <-ch:
-		if msg.Type == "invite_payload" || msg.Type == "commit" || msg.Type == "add_request" || msg.Type == "remove_request" {
-			s.mu.RLock()
-			var ips []string
-			for _, sub := range s.subscriptions[msg.VNI] {
-				ips = append(ips, sub.IP)
-			}
-			msg.IPs = strings.Join(ips, ",")
-			s.mu.RUnlock()
+// withBootID wraps an HTTP handler: it adds the boot-ID header to every response, so agents detect
+// a restart of the server, and records the time the calling agent was last seen, for the liveness
+// check.
+func (s *ServerImpl) withBootID(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(BootIDHeader, s.bootID)
+		if user := r.URL.Query().Get("user"); user != "" {
+			s.mu.Lock()
+			s.lastSeen[user] = time.Now()
+			s.mu.Unlock()
 		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(msg)
-
-	case <-time.After(20 * time.Second):
-		w.WriteHeader(http.StatusNoContent)
+		h(w, r)
 	}
 }
 
-func (s *ServerImpl) uploadKP(w http.ResponseWriter, r *http.Request) {
-	user := r.URL.Query().Get("user")
-	data, _ := io.ReadAll(r.Body)
-
-	s.mu.Lock()
-	s.keyPackages[user] = append(s.keyPackages[user], data)
-	s.mu.Unlock()
-
-	w.WriteHeader(http.StatusOK)
-}
-
-func (s *ServerImpl) getKP(w http.ResponseWriter, r *http.Request) {
-	user := r.URL.Query().Get("user")
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if len(s.keyPackages[user]) == 0 {
-		w.WriteHeader(http.StatusNotFound)
-		return
-	}
-
-	data := s.keyPackages[user][0]
-	s.keyPackages[user] = s.keyPackages[user][1:]
-
-	w.Write(data)
-}
-
-func (s *ServerImpl) handleSubscribe(w http.ResponseWriter, r *http.Request) {
-	user := r.URL.Query().Get("user")
-	idInt, _ := strconv.ParseUint(r.URL.Query().Get("id"), 10, 32)
-	id := uint32(idInt)
-	ip := r.URL.Query().Get("ip")
-
-	s.mu.Lock()
-	s.subscriptions[id] = append(s.subscriptions[id], Subscriber{User: user, IP: ip})
-
-	var group *GroupInfo
-	var isCreator bool
-
-	if s.groups[id] == nil {
-		group = &GroupInfo{Initiator: user, VNI: id}
-		s.groups[id] = group
-		isCreator = true
-	} else {
-		group = s.groups[id]
-		isCreator = false
-	}
-
-	initiator := group.Initiator
-	var ch chan Envelope
-
-	if !isCreator {
-		ch = s.getMailbox(initiator)
-	}
-	s.mu.Unlock()
-
-	if isCreator {
-		logrus.Infof("[MLS-Broker] User '%s' is first on VNI %d, created Group\n", user, id)
-		json.NewEncoder(w).Encode(BrokerResp{Status: "created", VNI: id})
-		return
-	}
-
-	logrus.Infof("[MLS-Broker] Requesting '%s' to invite '%s' to VNI %d\n", initiator, user, id)
-	req, _ := json.Marshal(ActionRequest{User: user, VNI: id})
-	ch <- Envelope{Type: "add_request", From: "broker", VNI: id, Data: req}
-
-	json.NewEncoder(w).Encode(BrokerResp{Status: "joined", VNI: id})
-}
-
-func (s *ServerImpl) handleUnsubscribe(w http.ResponseWriter, r *http.Request) {
-	user := r.URL.Query().Get("user")
-	idInt, _ := strconv.ParseUint(r.URL.Query().Get("id"), 10, 32)
-	id := uint32(idInt)
-
-	s.mu.Lock()
-	var newSubs []Subscriber
-	for _, sub := range s.subscriptions[id] {
-		if sub.User != user {
-			newSubs = append(newSubs, sub)
-		}
-	}
-	s.subscriptions[id] = newSubs
-
-	group := s.groups[id]
-	var initiator string
-	var ch chan Envelope
-
-	if group != nil {
-		if group.Initiator == user {
-			if len(s.subscriptions[id]) > 0 {
-				group.Initiator = s.subscriptions[id][0].User
-			} else {
-				group.Initiator = ""
-			}
-		}
-
-		initiator = group.Initiator
-		if initiator != "" {
-			ch = s.getMailbox(initiator)
-		}
-	}
-	s.mu.Unlock()
-
-	if initiator != "" {
-		logrus.Infof("[MLS-Broker] User '%s' unsubscribed from VNI %d. Mandating %s to issue remove commit.\n", user, id, initiator)
-		req, _ := json.Marshal(ActionRequest{User: user, VNI: id})
-		ch <- Envelope{Type: "remove_request", From: "broker", VNI: id, Data: req}
-	}
-	w.WriteHeader(http.StatusOK)
-}
-
-func (s *ServerImpl) startKeyRotationLoop() {
-	ticker := time.NewTicker(60 * time.Second)
+// housekeeping runs every 2 seconds and keeps all groups moving, even without new requests: it
+// replaces dead committers and lets progress resolve stalled rounds and operations.
+func (s *ServerImpl) housekeeping() {
+	ticker := time.NewTicker(2 * time.Second)
 	for range ticker.C {
 		s.mu.Lock()
-		var mandates []struct {
-			user string
-			vni  uint32
-			ch   chan Envelope
-		}
-
-		for _, group := range s.groups {
-			if subs, ok := s.subscriptions[group.VNI]; ok && len(subs) > 0 {
-				targetUser := subs[0].User
-				mandates = append(mandates, struct {
-					user string
-					vni  uint32
-					ch   chan Envelope
-				}{
-					user: targetUser,
-					vni:  group.VNI,
-					ch:   s.getMailbox(targetUser),
-				})
+		for _, g := range s.groups {
+			if g.committer != "" && !s.isAlive(g.committer) && len(g.members) > 1 {
+				if c := s.pickCommitter(g, g.committer); c != "" && s.isAlive(c) {
+					s.setCommitter(g, c)
+				}
 			}
+			s.progress(g)
 		}
 		s.mu.Unlock()
-
-		for _, m := range mandates {
-			logrus.Infof("[MLS-Broker] Triggering 60s key rotation. Mandating %s to update VNI %d", m.user, m.vni)
-			req, _ := json.Marshal(ActionRequest{VNI: m.vni})
-			m.ch <- Envelope{Type: "update_request", From: "broker", VNI: m.vni, Data: req}
-		}
 	}
 }
 
-func (s *ServerImpl) ackHandler(w http.ResponseWriter, r *http.Request) {
-	user := r.URL.Query().Get("user")
-	vniInt, _ := strconv.ParseUint(r.URL.Query().Get("vni"), 10, 32)
-	vni := uint32(vniInt)
-	epoch, _ := strconv.ParseUint(r.URL.Query().Get("epoch"), 10, 64)
-
-	s.mu.Lock()
-
-	if s.epochAcks[vni] == nil {
-		s.epochAcks[vni] = make(map[uint64]map[string]bool)
-	}
-	if s.epochAcks[vni][epoch] == nil {
-		s.epochAcks[vni][epoch] = make(map[string]bool)
-	}
-
-	s.epochAcks[vni][epoch][user] = true
-
-	subs, ok := s.subscriptions[vni]
-	if !ok {
-		s.mu.Unlock()
-		w.WriteHeader(http.StatusNotFound)
-		return
-	}
-
-	allAcked := true
-	for _, sub := range subs {
-		if !s.epochAcks[vni][epoch][sub.User] {
-			allAcked = false
-			break
+// keyRotationInterval returns the interval of the regular key rotation: MLS_KEY_ROTATION_INTERVAL
+// as a Go duration (e.g. "30m"), or 60 minutes, if it is not set or invalid.
+func keyRotationInterval() time.Duration {
+	if v := os.Getenv("MLS_KEY_ROTATION_INTERVAL"); v != "" {
+		interval, err := time.ParseDuration(v)
+		if err == nil && interval > 0 {
+			return interval
 		}
+		logrus.Errorf("[MLS-Broker] Invalid MLS_KEY_ROTATION_INTERVAL %q, using %s", v, defaultKeyRotationInterval)
 	}
-
-	var mailboxes []chan Envelope
-	if allAcked && len(subs) > 0 {
-		for _, sub := range subs {
-			mailboxes = append(mailboxes, s.getMailbox(sub.User))
-		}
-		delete(s.epochAcks[vni], epoch)
-	}
-
-	s.mu.Unlock()
-
-	if allAcked && len(mailboxes) > 0 {
-		logrus.Infof("[MLS-Broker] VNI %d Epoch %d fully ACKed. Broadcasting epoch_ready.", vni, epoch)
-		for _, ch := range mailboxes {
-			ch <- Envelope{
-				Type:  "epoch_ready",
-				From:  "broker",
-				VNI:   vni,
-				Epoch: epoch,
-			}
-		}
-	}
-
-	w.WriteHeader(http.StatusOK)
+	return defaultKeyRotationInterval
 }
 
+// startKeyRotationLoop rotates the keys of every group with at least two members in the given
+// interval. It queues a self-update for the committer, whose commit moves the group to a new epoch,
+// and the rekey round of that epoch replaces the SAs of all connection-pairs with new keys. A group,
+// which still has a rotation queued, e.g. because it is stalled by a dead member, gets no second
+// one.
+func (s *ServerImpl) startKeyRotationLoop(interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	for range ticker.C {
+		s.mu.Lock()
+		for _, g := range s.groups {
+			if len(g.members) < 2 || g.hasQueued(OpUpdate) {
+				continue
+			}
+			logrus.Infof("[MLS-Broker] Triggering key rotation for VNI %d", g.vni)
+			s.enqueue(g, OpUpdate, "")
+			s.progress(g)
+		}
+		s.mu.Unlock()
+	}
+}
+
+// Start registers the HTTP endpoints for the agents, starts the housekeeping and the key rotation
+// and serves on the given address. It blocks for the whole lifetime of the server.
 func (s *ServerImpl) Start(port string) error {
-	logrus.Infof("[MLS-Broker] start MLS server")
+	logrus.Infof("[MLS-Broker] start MLS server with boot-id %s", s.bootID)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/send", s.sendHandler)
-	mux.HandleFunc("/poll", s.pollHandler)
-	mux.HandleFunc("/upload_kp", s.uploadKP)
-	mux.HandleFunc("/get_kp", s.getKP)
-	mux.HandleFunc("/subscribe", s.handleSubscribe)
-	mux.HandleFunc("/unsubscribe", s.handleUnsubscribe)
-	mux.HandleFunc("/ack", s.ackHandler)
+	mux.HandleFunc("/register", s.withBootID(s.registerHandler))
+	mux.HandleFunc("/send", s.withBootID(s.sendHandler))
+	mux.HandleFunc("/poll", s.withBootID(s.pollHandler))
+	mux.HandleFunc("/upload_kp", s.withBootID(s.uploadKP))
+	mux.HandleFunc("/get_kp", s.withBootID(s.getKP))
+	mux.HandleFunc("/subscribe", s.withBootID(s.handleSubscribe))
+	mux.HandleFunc("/unsubscribe", s.withBootID(s.handleUnsubscribe))
+	mux.HandleFunc("/op_done", s.withBootID(s.opDoneHandler))
+	mux.HandleFunc("/ready", s.withBootID(s.readyHandler))
+	mux.HandleFunc("/round_ack", s.withBootID(s.roundAckHandler))
 
-	// go s.startKeyRotationLoop()
+	go s.housekeeping()
+
+	interval := keyRotationInterval()
+	logrus.Infof("[MLS-Broker] rotating keys every %s", interval)
+	go s.startKeyRotationLoop(interval)
 
 	return http.ListenAndServe(port, mux)
 }

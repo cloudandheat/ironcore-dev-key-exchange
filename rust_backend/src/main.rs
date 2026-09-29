@@ -336,6 +336,97 @@ fn self_update(client_id: &String, group_id: &String) -> Result<Vec<u8>, Status>
         .map_err(|e| Status::internal(format!("Error serializing commit: {:?}", e)))
 }
 
+fn get_group_info(group_id: &String) -> Result<(bool, u64, Vec<String>), Status> {
+    let groups = CLIENT_GROUPS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .map_err(|_| Status::internal("Failed to acquire group lock"))?;
+    let group = match groups.get(group_id) {
+        Some(group) => group,
+        None => return Ok((false, 0, Vec::new())),
+    };
+
+    let members = group
+        .members()
+        .map(|member| String::from_utf8_lossy(member.credential.serialized_content()).into_owned())
+        .collect();
+
+    Ok((group.is_active(), group.epoch().as_u64(), members))
+}
+
+// re-add a member, which lost its state, within one single commit, so the group never goes
+// through an epoch without it
+fn swap_member(
+    client_id: &String,
+    group_id: &String,
+    target_client_id: &String,
+    target_kp_hex: String,
+) -> Result<(Vec<u8>, Vec<u8>), Status> {
+    let target_identity = target_client_id.clone().into_bytes();
+    let expected_credential: Credential = BasicCredential::new(target_identity).into();
+    let target_index = {
+        let groups = CLIENT_GROUPS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .map_err(|_| Status::internal("Failed to acquire group lock"))?;
+        let group = groups
+            .get(group_id)
+            .ok_or_else(|| Status::not_found("Group not found"))?;
+        group
+            .members()
+            .find(|member| member.credential == expected_credential)
+            .map(|member| member.index)
+    };
+
+    // member not in the group anymore, so this is a normal invite
+    let target_index = match target_index {
+        Some(index) => index,
+        None => return invite_members(client_id, group_id, target_kp_hex),
+    };
+
+    let provider = get_provider(client_id)?;
+    let mut groups = CLIENT_GROUPS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .map_err(|_| Status::internal("Failed to acquire group lock"))?;
+    let group = groups
+        .get_mut(group_id)
+        .ok_or_else(|| Status::not_found("Group not found"))?;
+
+    let kp_bytes = hex::decode(target_kp_hex)
+        .map_err(|e| Status::invalid_argument(format!("Invalid hex: {:?}", e)))?;
+    let key_package_in = KeyPackageIn::tls_deserialize(&mut kp_bytes.as_slice()).map_err(|e| {
+        Status::invalid_argument(format!("Failed to deserialize KeyPackageIn: {:?}", e))
+    })?;
+    let key_package = key_package_in
+        .validate(provider.0.crypto(), ProtocolVersion::Mls10)
+        .map_err(|e| Status::invalid_argument(format!("Failed to validate KeyPackage: {:?}", e)))?;
+
+    let messages = group
+        .swap_members(
+            &provider.0,
+            &provider.2,
+            &[target_index],
+            core::slice::from_ref(&key_package),
+        )
+        .map_err(|e| Status::internal(format!("Could not swap member: {:?}", e)))?;
+
+    group
+        .merge_pending_commit(&provider.0)
+        .map_err(|e| Status::internal(format!("Error merging pending commit: {:?}", e)))?;
+
+    let welcome_bytes = messages
+        .welcome
+        .tls_serialize_detached()
+        .map_err(|e| Status::internal(format!("Error serializing welcome: {:?}", e)))?;
+    let commit_bytes = messages
+        .commit
+        .tls_serialize_detached()
+        .map_err(|e| Status::internal(format!("Error serializing commit: {:?}", e)))?;
+
+    Ok((welcome_bytes, commit_bytes))
+}
+
 // drop group from client
 fn drop_group(group_id: &String) -> Result<(), Status> {
     let mut groups = CLIENT_GROUPS
@@ -455,11 +546,43 @@ impl MlsService for BackendMlsService {
         drop_group(&req.group_id)?;
         Ok(Response::new(Empty {}))
     }
+
+    async fn get_group_info(
+        &self,
+        request: Request<GroupInfoReq>,
+    ) -> Result<Response<GroupInfoRes>, Status> {
+        let req = request.into_inner();
+        let (exists, epoch, members) = get_group_info(&req.group_id)?;
+        Ok(Response::new(GroupInfoRes {
+            exists,
+            epoch,
+            members,
+        }))
+    }
+
+    async fn swap_member(
+        &self,
+        request: Request<SwapMemberReq>,
+    ) -> Result<Response<InviteRes>, Status> {
+        let req = request.into_inner();
+        let (welcome, commit) = swap_member(
+            &req.client_id,
+            &req.group_id,
+            &req.target_client_id,
+            req.target_kp_hex,
+        )?;
+        Ok(Response::new(InviteRes {
+            welcome_bytes: welcome,
+            commit_bytes: commit,
+        }))
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let addr = "[::]:50051".parse()?;
+    let addr = std::env::var("RUST_GRPC_LISTEN")
+        .unwrap_or_else(|_| "[::]:50051".to_string())
+        .parse()?;
     let service = BackendMlsService::default();
 
     println!("Rust MLS gRPC Backend listening on {}", addr);
