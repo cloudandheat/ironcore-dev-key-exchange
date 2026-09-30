@@ -1,3 +1,7 @@
+# Build targets:
+#   docker build --target agent        -t ironcore_key_exchange_agent .
+#   docker build --target server       -t ironcore_key_exchange_server .
+
 FROM rust:latest AS rust-builder
 RUN apt-get update && apt-get install -y protobuf-compiler
 WORKDIR /usr/src/app
@@ -8,7 +12,7 @@ RUN cargo build --release
 
 
 
-FROM golang:latest AS go-builder
+FROM golang:latest AS go-builder-agent
 RUN apt-get update && apt-get install -y protobuf-compiler
 RUN go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
 RUN go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
@@ -23,11 +27,31 @@ RUN go build -o /bin/agent_app cmd/main.go
 
 
 
-FROM debian:bookworm-slim
+FROM golang:latest AS go-builder-server
+WORKDIR /build
+COPY mls_server/ ./mls_server/
+WORKDIR /build/mls_server
+RUN go mod tidy
+RUN go build -o /bin/server_app cmd/main.go
+
+
+
+FROM debian:bookworm-slim AS runtime-base
 RUN apt-get update && apt-get install -y ca-certificates curl && rm -rf /var/lib/apt/lists/*
 
+
+
+FROM runtime-base AS server
+COPY --from=go-builder-server /bin/server_app /usr/local/bin/
+
+EXPOSE 4713
+CMD ["server_app"]
+
+
+
+FROM runtime-base AS agent
 COPY --from=rust-builder /usr/src/app/rust_backend/target/release/rust_mls_backend /usr/local/bin/
-COPY --from=go-builder /bin/agent_app /usr/local/bin/
+COPY --from=go-builder-agent /bin/agent_app /usr/local/bin/
 
 # Start both the Rust gRPC server and the Go Agent gRPC server
 RUN echo '#!/bin/bash\n\

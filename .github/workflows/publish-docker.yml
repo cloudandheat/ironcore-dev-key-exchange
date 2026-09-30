@@ -1,0 +1,100 @@
+name: Build and Publish Docker Image
+
+on:
+  push:
+    branches:
+    - main
+    - feat/PoC-key-exchange-plugin-with-MLS
+    tags:
+    - v*
+  pull_request:
+    types:
+    - labeled
+
+jobs:
+  buildAndPush:
+    permissions:
+      contents: read
+      packages: write
+    if: |
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'ok-to-image') || contains(github.event.pull_request.labels.*.name, 'ok-to-🐳')))
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - target: agent
+          image: ironcore_key_exchange_agent
+        - target: server
+          image: ironcore_key_exchange_server
+    steps:
+    - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+    - uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+      id: meta
+      with:
+        images: |
+          ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+        tags: |
+          type=semver,pattern={{version}}
+          type=schedule
+          type=ref,event=branch
+          type=ref,event=tag
+          type=ref,event=pr
+          type=sha
+        flavor: |
+          latest=${{ github.ref == 'refs/heads/main' }}
+
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+      with:
+        platforms: all
+    # workaround for self-hosted runner
+    # https://github.com/mumoshu/actions-runner-controller-ci/commit/e91c8c0f6ca82aa7618010c6d2f417aa46c4a4bf
+
+    - name: Set up Docker Context for Buildx
+      id: buildx-context
+      run: |
+        docker context create builders
+
+    - name: Set up Docker Buildx
+      timeout-minutes: 5
+      uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      with:
+        version: latest
+        endpoint: builders # self-hosted
+
+    - name: Login to GHCR
+      if: github.event_name != 'pull_request'
+      uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Determine version
+      id: vars
+      run: |
+        if [ "${{ github.ref }}" == "refs/heads/main" ]; then
+          METALBOND_VERSION=$(echo "${{ github.sha }}" | cut -c1-7)
+        else
+          METALBOND_VERSION=${GITHUB_REF##*/}
+        fi
+        echo "METALBOND_VERSION=$METALBOND_VERSION" >> $GITHUB_ENV
+
+    - name: Install dependencies
+      run: sudo apt-get update && sudo apt-get install -y libpcap-dev
+
+    - name: Build and push
+      timeout-minutes: 40
+      uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+      with:
+        context: .
+        file: Dockerfile
+        target: ${{ matrix.target }}
+        build-args: |
+          METALBOND_VERSION=${{ env.METALBOND_VERSION }}
+        platforms: linux/amd64
+        push: ${{ github.event_name != 'pull_request' }}
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
