@@ -378,27 +378,3 @@ func (a *AgentImpl) underlayFromDpservice() (string, error) {
 	}
 	return "", fmt.Errorf("no interface with underlay route found")
 }
-
-// markAllInterfacesAsEncrypted enables encryption on all interfaces of the VNI in dpservice. It is
-// a workaround until metalnet does this itself, and is called once the egress SAs of the VNI are in
-// place.
-func (a *AgentImpl) markAllInterfacesAsEncrypted(vni uint32) {
-	// Workaround for the moment to enable encryption for all interfaces of the VNI
-	// TODO: handle by metalnet network-interface controller
-	ctx, cancel := context.WithTimeout(context.Background(), dpserviceTimeout)
-	defer cancel()
-
-	interfaceList, err := a.dpdkClient.ListInterfaces(ctx)
-	if err != nil {
-		logrus.Errorf("[%s] Error listing interfaces: %v", a.name, err)
-		return
-	}
-	for _, iface := range interfaceList.Items {
-		if iface.Spec.VNI == vni && !iface.Spec.Encrypt {
-			_, err := a.dpdkClient.EnableInterfaceEncryption(ctx, iface.ID)
-			if err != nil {
-				logrus.Errorf("[%s] Error enabling encryption of interface %s: %v", a.name, iface.ID, err)
-			}
-		}
-	}
-}

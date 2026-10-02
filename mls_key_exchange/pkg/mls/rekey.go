@@ -119,8 +119,6 @@ func (a *AgentImpl) roundSwitch(vni uint32, r *roundState) {
 		logrus.Infof("[%s] Switched egress SA of VNI %d towards %s (%s) to slot %d", a.name, vni, user, peer, ps.egressSlot)
 	}
 
-	// Workaround. TODO: remove and handle in metalnet
-	a.markAllInterfacesAsEncrypted(vni)
 	a.setKeyReady(vni, true)
 
 	a.postRoundAck(vni, r.epoch, "switch", nil)
